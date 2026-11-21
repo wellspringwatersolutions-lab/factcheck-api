@@ -5,7 +5,9 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from urllib.parse import urlparse
 
-from fastapi import FastAPI, HTTPException
+import asyncio
+
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from mcp.server.transport_security import TransportSecuritySettings
@@ -118,7 +120,7 @@ def create_app(settings: Settings | None = None, service=None) -> FastAPI:
         intent = gateway.create_checkout(api_key_id="", pack_id=pack_id)
         return JSONResponse(status_code=501, content={"error": {"code": "payment_not_configured", **intent.__dict__}})
 
-    def _run_verify(body: VerifyIn):
+    def _run_verify(body: VerifyIn, disconnect_check=None):
         if not body.text and not body.claims:
             raise HTTPException(status_code=422, detail="Provide text or claims.")
         if body.text and len(body.text) > settings.max_text_chars:
@@ -127,7 +129,12 @@ def create_app(settings: Settings | None = None, service=None) -> FastAPI:
             raise HTTPException(status_code=422, detail="Too many claims.")
         identity = current_identity()
         try:
-            return service.verify(text=body.text, claims=body.claims, client=identity)
+            return service.verify(
+                text=body.text,
+                claims=body.claims,
+                client=identity,
+                disconnect_check=disconnect_check,
+            )
         except BillingError as exc:
             return JSONResponse(status_code=exc.status, content=exc.body())
         except Exception:
@@ -136,13 +143,32 @@ def create_app(settings: Settings | None = None, service=None) -> FastAPI:
                 content={"error": {"code": "internal_error", "message": "The check failed before a verdict was saved."}},
             )
 
+    async def _execute(body: VerifyIn, request: Request):
+        disconnected = asyncio.Event()
+
+        async def watch() -> None:
+            try:
+                while not disconnected.is_set():
+                    if await request.is_disconnected():
+                        disconnected.set()
+                        return
+                    await asyncio.sleep(0.2)
+            except asyncio.CancelledError:
+                return
+
+        watcher = asyncio.create_task(watch())
+        try:
+            return await asyncio.to_thread(_run_verify, body, disconnected.is_set)
+        finally:
+            watcher.cancel()
+
     @app.post("/v1/verify")
-    def verify(body: VerifyIn):
-        return _run_verify(body)
+    async def verify(body: VerifyIn, request: Request):
+        return await _execute(body, request)
 
     @app.post("/check")
-    def check(body: VerifyIn):
-        result = _run_verify(body)
+    async def check(body: VerifyIn, request: Request):
+        result = await _execute(body, request)
         if isinstance(result, JSONResponse):
             return result
         source_text = body.text or "\n".join(body.claims or [])

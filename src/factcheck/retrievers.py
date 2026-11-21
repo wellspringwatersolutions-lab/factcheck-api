@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import re
+from concurrent.futures import ThreadPoolExecutor, TimeoutError, as_completed
+
 import httpx
 
 from factcheck.types import Evidence
@@ -27,7 +29,7 @@ class DesearchRetriever:
     def __init__(self, api_key: str, base_url: str = "https://api.desearch.ai", client: httpx.Client | None = None):
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
-        self.client = client or httpx.Client(timeout=20.0)
+        self.client = client or httpx.Client(timeout=8.0)
         self.cost_usd = 0.0
 
     def _headers(self) -> dict[str, str]:
@@ -114,23 +116,30 @@ class CompositeRetriever:
         self.providers = [provider for provider in providers if not getattr(provider, "scientific_only", False)]
         self.scholarly = scholarly
         self.warnings: list[str] = []
+        self.timeout = 8.0
 
     @property
     def cost_usd(self) -> float:
         return sum(getattr(provider, "cost_usd", 0.0) for provider in self.providers)
 
     def search(self, query: str, *, limit: int = 6, scientific: bool = False, categories: list[str] | None = None) -> list[Evidence]:
-        hits: list[Evidence] = []
-        for provider in self.providers:
-            try:
-                hits.extend(provider.search(query, limit=limit))
-            except Exception as exc:  # noqa: BLE001 - one source should not sink the check
-                self.warnings.append(f"{provider.name}:{exc.__class__.__name__}")
+        jobs = [lambda provider=provider: provider.search(query, limit=limit) for provider in self.providers]
         if self.scholarly and (scientific or set(categories or []) & {"T2", "T3", "T4"}):
+            jobs.append(lambda: self.scholarly.search(query, limit=limit, categories=categories or (["T2"] if scientific else [])))
+        hits: list[Evidence] = []
+        if not jobs:
+            return []
+        with ThreadPoolExecutor(max_workers=min(4, len(jobs))) as pool:
+            futures = [pool.submit(job) for job in jobs]
             try:
-                hits.extend(self.scholarly.search(query, limit=limit, categories=categories or (["T2"] if scientific else [])))
-            except Exception as exc:  # noqa: BLE001
-                self.warnings.append(f"scholarly:{exc.__class__.__name__}")
+                for future in as_completed(futures, timeout=self.timeout):
+                    try:
+                        hits.extend(future.result())
+                    except Exception as exc:  # noqa: BLE001
+                        self.warnings.append(f"retriever:{exc.__class__.__name__}")
+            except TimeoutError:
+                self.warnings.append("retriever:timeout")
+        if self.scholarly:
             self.warnings.extend(getattr(self.scholarly, "warnings", []))
         seen: set[str] = set()
         kept = []

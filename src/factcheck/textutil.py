@@ -67,11 +67,15 @@ def normalize_text(text: str) -> str:
 
 
 def split_sentences(text: str) -> list[str]:
-    cleaned = " ".join((text or "").split())
-    if not cleaned:
-        return []
-    parts = _SENTENCE_SPLIT.split(cleaned)
-    return [part.strip() for part in parts if part.strip()]
+    """Split lines first so a table row or list item is not glued to the next one."""
+    found: list[str] = []
+    for raw in (text or "").splitlines() or [text or ""]:
+        cleaned = " ".join(raw.split())
+        if not cleaned:
+            continue
+        parts = _SENTENCE_SPLIT.split(cleaned)
+        found.extend(part.strip() for part in parts if part.strip())
+    return found
 
 
 def has_negation(text: str) -> bool:

@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass
 
 from factcheck.categories import classify_category, is_hypothesis, is_math, normalize_claim
+from factcheck.cleanup import clean_claim_text, prepare_answer
 from factcheck.llm import LLMError, estimate_cost, loads_object
 from factcheck.textutil import is_time_sensitive, split_sentences
 from factcheck.types import ExtractedClaim, UsageMeter
@@ -79,8 +80,10 @@ def resolve_pronouns(text: str, context: str) -> tuple[str, bool]:
 
 
 def heuristic_extract(text: str | None, claims: list[str] | None) -> list[ExtractedClaim]:
+    prepared = prepare_answer(text) if text else None
+    prepared_claims = [clean_claim_text(claim) for claim in claims] if claims else None
     found: list[ExtractedClaim] = []
-    for sentence in build_sentences(text, claims):
+    for sentence in build_sentences(prepared, prepared_claims):
         label = heuristic_label(sentence.text)
         if label == "drop":
             continue
@@ -214,7 +217,7 @@ class LiveExtractor:
         return loads_object(result)
 
     def extract(self, text: str | None, claims: list[str] | None) -> tuple[list[ExtractedClaim], list[str]]:
-        sentences = build_sentences(text, claims)
+        sentences = build_sentences(prepare_answer(text) if text else None, [clean_claim_text(claim) for claim in claims] if claims else None)
         if not sentences:
             return [], []
         try:

@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import time
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from uuid import uuid4
 
 from factcheck.aggregate import RULES_VERSION, decide
 from factcheck.categories import CATEGORIES, EFFORT_LIMITS, effort_for, normalize_claim
 from factcheck.checks import UrlChecker, apply_passage_checks, passage_check_rows
+from factcheck.cleanup import focus_query, priority
 from factcheck.compute import recompute
 from factcheck.credibility import annotate, dedupe_syndicated, dedupe_urls
 from factcheck.judge import apply_verified_labels
@@ -152,8 +155,10 @@ class VerificationService:
         self.store = store
         self.cache = cache
         self.billing = billing
-        self.url_checker = url_checker or UrlChecker(timeout=min(12.0, settings.request_timeout_seconds))
+        self.url_checker = url_checker or UrlChecker(timeout=min(8.0, getattr(settings, "retrieval_timeout_seconds", 8.0)))
         self.capital_fetcher = capital_fetcher
+        self._disconnect = None
+        self._meter_lock = __import__("threading").Lock()
 
     def health(self) -> dict:
         soma = any(getattr(provider, "name", "") == "soma" for provider in getattr(getattr(self.extractor, "client", None), "providers", []) or [])
@@ -166,8 +171,9 @@ class VerificationService:
             "soma_dev_only": soma,
         }
 
-    def verify(self, *, text, claims, client, preclassified=None, charge=True):
+    def verify(self, *, text, claims, client, preclassified=None, charge=True, disconnect_check=None):
         reservation = self.billing.authorize(client) if charge else None
+        self._disconnect = disconnect_check
         meter = UsageMeter()
         if hasattr(self.extractor, "meter"):
             self.extractor.meter = meter
@@ -188,7 +194,10 @@ class VerificationService:
             payload = self._assemble(text, claims, outputs, meter, warnings, client, charge)
             self.store.save(payload, fingerprint=getattr(client, "fingerprint", None), tier=payload.usage.tier, api_key_id=getattr(reservation, "api_key_id", None))
             if charge:
-                self.billing.complete(reservation, payload.usage.estimated_cost_usd, payload.verification_id)
+                if disconnect_check and disconnect_check():
+                    self.billing.release(reservation)
+                else:
+                    self.billing.complete(reservation, payload.usage.estimated_cost_usd, payload.verification_id)
             return payload
         except Exception:
             if reservation is not None:
@@ -198,25 +207,93 @@ class VerificationService:
     def get(self, verification_id: str) -> VerificationOut | None:
         return self.store.get(verification_id)
 
+    def _disconnected(self) -> bool:
+        return bool(self._disconnect and self._disconnect())
+
+    def _not_checked(self, claim: ExtractedClaim, reason: str) -> ClaimOut:
+        return ClaimOut(
+            text=claim.text,
+            claim_type="opinion" if claim.claim_category == "T8" else "fact",
+            claim_category=claim.claim_category,
+            category_label=CATEGORIES.get(claim.claim_category, ""),
+            effort="skipped",
+            verdict="Unverified",
+            strength_of_support=0.0,
+            confidence=0.0,
+            reasoning=reason,
+            attribution=claim.attribution,
+            needs_human_review=False,
+        )
+
     def _run(self, extracted: list[ExtractedClaim], meter: UsageMeter, warnings: list[str]) -> list[ClaimOut]:
         self._cost_mark = getattr(self.retriever, "cost_usd", 0.0)
         results: list[ClaimOut | None] = [None] * len(extracted)
-        buckets: dict[str, list[int]] = {name: [] for name in ("compute", "opinion", "hypothesis", "light", "standard", "strict")}
+        if self._disconnected():
+            return [self._not_checked(claim, "Not checked: the client disconnected before the check finished.") for claim in extracted]
+        deadline = time.monotonic() + float(getattr(self.settings, "request_budget_seconds", 40))
+        order = sorted(range(len(extracted)), key=lambda index: priority(extracted[index]))
+        cap = int(getattr(self.settings, "max_checked_claims", 6))
+        selected = order[:cap]
+        if len(extracted) > cap:
+            warnings.append(f"Checked {cap} of {len(extracted)} claims. The rest were not checked.")
+        for index in order[cap:]:
+            results[index] = self._not_checked(
+                extracted[index],
+                "Not checked in this request. The check focused on the highest-stakes claims.",
+            )
+        jobs = self._jobs(extracted, selected, results, meter, warnings, deadline)
+        workers = max(1, int(getattr(self.settings, "check_concurrency", 4)))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = []
+            for job in jobs:
+                if time.monotonic() >= deadline or self._disconnected():
+                    break
+                futures.append(pool.submit(job))
+            for future in as_completed(futures):
+                try:
+                    future.result()
+                except Exception as exc:  # noqa: BLE001
+                    warnings.append(f"claim_failed:{exc.__class__.__name__}")
         for index, claim in enumerate(extracted):
-            buckets[effort_for(claim)].append(index)
-        for index in buckets["compute"]:
-            results[index] = self._math_claim(extracted[index])
-        if buckets["opinion"]:
-            self._opinions(extracted, buckets["opinion"], results)
-        for effort in ("hypothesis", "light", "standard", "strict"):
-            indexes = buckets[effort]
-            if not indexes:
-                continue
-            subset = [extracted[index] for index in indexes]
-            for cluster in _cluster(subset):
-                global_indexes = [indexes[position] for position in cluster]
-                self._evidence_cluster(extracted, global_indexes, results, effort, meter, warnings)
+            if results[index] is None:
+                reason = (
+                    "Not checked: the client disconnected before the check finished."
+                    if self._disconnected()
+                    else "Not checked: the time budget ran out before this claim was retrieved."
+                )
+                results[index] = self._not_checked(claim, reason)
         return [item for item in results if item is not None]
+
+    def _jobs(self, extracted, selected, results, meter, warnings, deadline):
+        indexes = list(selected)
+        buckets: dict[str, list[int]] = {name: [] for name in ("compute", "opinion", "hypothesis", "light", "standard", "strict")}
+        for index in indexes:
+            buckets[effort_for(extracted[index])].append(index)
+        jobs = []
+        for index in buckets["compute"]:
+            claim = extracted[index]
+            jobs.append(lambda claim=claim, index=index: results.__setitem__(index, self._math_claim(claim)))
+        if buckets["opinion"]:
+            opinion_indexes = list(buckets["opinion"])
+            jobs.append(lambda opinion_indexes=opinion_indexes: self._opinions(extracted, opinion_indexes, results))
+        for effort in ("hypothesis", "light", "standard", "strict"):
+            subset_indexes = buckets[effort]
+            if not subset_indexes:
+                continue
+            subset = [extracted[index] for index in subset_indexes]
+            for cluster in _cluster(subset):
+                global_indexes = [subset_indexes[position] for position in cluster]
+                jobs.append(
+                    lambda global_indexes=global_indexes, effort=effort: self._guarded_cluster(
+                        extracted, global_indexes, results, effort, meter, warnings, deadline
+                    )
+                )
+        return jobs
+
+    def _guarded_cluster(self, extracted, indexes, results, effort, meter, warnings, deadline) -> None:
+        if time.monotonic() >= deadline or self._disconnected():
+            return
+        self._evidence_cluster(extracted, indexes, results, effort, meter, warnings)
 
     def _math_claim(self, claim: ExtractedClaim) -> ClaimOut:
         tool = recompute(claim.text)
@@ -262,12 +339,13 @@ class VerificationService:
     def _evidence_cluster(self, extracted, indexes, results, effort, meter, warnings) -> None:
         claims = [extracted[index] for index in indexes]
         limit = EFFORT_LIMITS[effort]["search"]
-        query = " ; ".join(claim.text for claim in claims)[:400]
+        query = focus_query(" ".join(claim.text for claim in claims))
         scientific = any(claim.scientific or claim.claim_category in {"T2", "T3", "T4"} for claim in claims)
         categories = [claim.claim_category for claim in claims]
         before = getattr(self.retriever, "cost_usd", 0.0)
         hits = list(self.retriever.search(query, limit=limit, scientific=scientific, categories=categories))
-        meter.add_usd(getattr(self.retriever, "cost_usd", 0.0) - before, retriever=True)
+        with self._meter_lock:
+            meter.add_usd(getattr(self.retriever, "cost_usd", 0.0) - before, retriever=True)
         warnings.extend(getattr(self.retriever, "warnings", [])[-3:])
         hits = dedupe_urls(hits)
         hits = self._resolve_all(claims, hits, effort)

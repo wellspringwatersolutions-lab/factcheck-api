@@ -65,7 +65,11 @@ class Settings(BaseSettings):
     credits_per_check: float = 1.0
     max_text_chars: int = 20_000
     max_input_claims: int = 20
-    max_output_claims: int = 12
+    max_output_claims: int = 24
+    max_checked_claims: int = 6
+    check_concurrency: int = 4
+    request_budget_seconds: float = 40
+    retrieval_timeout_seconds: float = 8
     stale_after_days: int = 120
     cache_ttl_seconds: int = 86_400
     cache_ttl_time_sensitive_seconds: int = 1_800

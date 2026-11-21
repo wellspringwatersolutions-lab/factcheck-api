@@ -92,7 +92,16 @@ class BillingGate:
                 raise BillingError("spend_cap_exceeded", self._upgrade("cap"), 429, self.settings.resolved_upgrade_url())
             existing = session.get(FreeCheckRow, fingerprint)
             if existing is not None:
-                raise BillingError("free_tier_exhausted", self._upgrade("free"), 402, self.settings.resolved_upgrade_url())
+                created = existing.created_at
+                if created.tzinfo is None:
+                    created = created.replace(tzinfo=timezone.utc)
+                age = (datetime.now(timezone.utc) - created).total_seconds()
+                stale = existing.status == "reserved" and age > 180
+                if stale:
+                    session.delete(existing)
+                    session.commit()
+                else:
+                    raise BillingError("free_tier_exhausted", self._upgrade("free"), 402, self.settings.resolved_upgrade_url())
             session.add(
                 FreeCheckRow(
                     fingerprint=fingerprint,
