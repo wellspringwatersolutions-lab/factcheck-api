@@ -14,7 +14,7 @@ The product name lives in `src/factcheck/branding.py` as `SERVICE_NAME`.
 
 - `mode`: `"text"` or `"question"`
 - `draft_answer`: `{"model", "text"}` when `mode` is `"question"`, otherwise `null`. The draft is not evidence and has no weight in a verdict.
-- `synopsis`: `{"rating", "summary", "caveats", "unchecked_count"}`. `rating` is one of Accurate, Mostly accurate, Mixed, Mostly inaccurate, Inaccurate, Not enough evidence. It is computed from the claim verdicts and cited quotes. A model may only phrase the summary, and that phrasing is dropped if it adds a fact, the claim was contradicted, or the time budget is gone. When a cited passage contradicts the draft, `summary` states that quote as the corrected position.
+- `synopsis`: `{"rating", "tldr", "summary", "caveats", "unchecked_count", "counts"}`. `rating` is one of Accurate, Mostly accurate, Mixed, Mostly inaccurate, Inaccurate, Not enough evidence. It is computed from the claim verdicts and cited quotes. `tldr` is one sentence of at most 30 words, written in the same phrasing call as `summary` and dropped if it adds a fact. `counts` is `{"supported", "contradicted", "conflicting", "unverified", "hypothesis", "opinion", "not_checked"}`. When a cited passage contradicts the draft, `summary` states that quote as the corrected position. A short question without a `?` still counts as a question when it starts with a question word.
 - A failed draft is HTTP 503 `{"error": {"code": "draft_failed", ...}}`. That request is not charged.
 
 `POST /v1/verify` also returns:

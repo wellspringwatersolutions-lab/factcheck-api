@@ -37,13 +37,18 @@ WASHINGTON = [
 
 def test_synopsis_shape_includes_the_caveat():
     synopsis = build_synopsis(WASHINGTON, question="Was George Washington a criminal?")
-    assert set(synopsis.model_dump()) == {"rating", "summary", "caveats", "unchecked_count"}
+    assert set(synopsis.model_dump()) == {"rating", "summary", "tldr", "caveats", "unchecked_count", "counts"}
     assert synopsis.rating == "Mostly accurate"
     assert synopsis.summary.startswith("Mostly accurate")
     assert "never charged" in synopsis.summary.lower()
     assert "treason" in synopsis.summary.lower()
+    assert synopsis.tldr
+    assert len(synopsis.tldr.split()) <= 30
+    assert "never charged" in synopsis.tldr.lower() or "treason" in synopsis.tldr.lower()
     assert synopsis.caveats
     assert synopsis.unchecked_count == 0
+    assert synopsis.counts.supported == 3
+    assert synopsis.counts.model_dump()["contradicted"] == 0
 
 
 def test_synopsis_falls_back_when_phrasing_fails_or_invents_a_fact():
@@ -53,14 +58,34 @@ def test_synopsis_falls_back_when_phrasing_fails_or_invents_a_fact():
     fallback = build_synopsis(WASHINGTON, question="Was George Washington a criminal?", phrasing=fail)
     assert fallback.rating == "Mostly accurate"
     assert "1799" not in fallback.summary
+    assert fallback.tldr
+    assert len(fallback.tldr.split()) <= 30
+    assert "1799" not in fallback.tldr
 
     def invent(brief, rating):
-        return "Mostly accurate. He was pardoned in 1799 after a secret trial."
+        return {
+            "summary": "Mostly accurate. He was pardoned in 1799 after a secret trial.",
+            "tldr": "He was pardoned in 1799 after a secret trial.",
+        }
 
     safe = build_synopsis(WASHINGTON, question="Was George Washington a criminal?", phrasing=invent)
     assert "1799" not in safe.summary
+    assert "1799" not in safe.tldr
     assert "pardoned" not in safe.summary.lower()
+    assert "pardoned" not in safe.tldr.lower()
     assert safe.summary.startswith("Mostly accurate")
+    assert safe.tldr
+    assert len(safe.tldr.split()) <= 30
+
+    def phrase(brief, rating):
+        return {
+            "summary": "Mostly accurate. He was never charged or convicted of a crime, but technically he committed treason under British law.",
+            "tldr": "He was never charged or convicted of a crime, but technically he committed treason under British law.",
+        }
+
+    kept = build_synopsis(WASHINGTON, question="Was George Washington a criminal?", phrasing=phrase)
+    assert kept.tldr.lower().startswith("he was never charged")
+    assert "1799" not in kept.tldr
 
     def forbidden(brief, rating):
         raise AssertionError("phrasing should not run once the budget is gone")
@@ -72,6 +97,52 @@ def test_synopsis_falls_back_when_phrasing_fails_or_invents_a_fact():
         deadline=time.monotonic() - 1,
     )
     assert skipped.rating == "Mostly accurate"
+    assert skipped.tldr
+    assert len(skipped.tldr.split()) <= 30
+
+
+def test_counts_put_each_claim_in_one_bucket():
+    rows = [
+        _claim("The first claim holds.", "Supported"),
+        _claim("The second claim does not hold.", "Contradicted"),
+        _claim("The sources disagree on this claim.", "Conflicting"),
+        _claim("Nothing was retrieved for this claim.", "Unverified", 0.0, reasoning="No retrieved passage or tool result backs this claim."),
+        ClaimOut(
+            text="A new treatment might work next year.",
+            claim_type="fact",
+            claim_category="T8",
+            verdict="Hypothesis",
+            strength_of_support=0.2,
+            confidence=0.2,
+            reasoning="This is a hypothesis.",
+        ),
+        ClaimOut(
+            text="The bill is a disaster.",
+            claim_type="opinion",
+            claim_category="T8",
+            verdict=None,
+            strength_of_support=0.0,
+            confidence=0.0,
+            reasoning="Opinion.",
+        ),
+        _claim(
+            "This one was left out.",
+            "Unverified",
+            0.0,
+            effort="skipped",
+            reasoning="Not checked in this request.",
+        ),
+    ]
+    counts = build_synopsis(rows).counts
+    assert counts.model_dump() == {
+        "supported": 1,
+        "contradicted": 1,
+        "conflicting": 1,
+        "unverified": 1,
+        "hypothesis": 1,
+        "opinion": 1,
+        "not_checked": 1,
+    }
 
 
 def test_multi_turn_questions_are_context_and_the_last_answer_is_checked():
@@ -112,11 +183,19 @@ def test_mostly_unverified_stays_cautious():
     assert "unverified" in synopsis.summary.lower()
     assert "mostly accurate" not in synopsis.summary.lower()
     assert synopsis.unchecked_count == 1
+    assert synopsis.tldr == "There wasn't enough evidence to settle this."
+    assert synopsis.counts.unverified == 4
+    assert synopsis.counts.supported == 1
+    assert synopsis.counts.not_checked == 1
+    assert synopsis.counts.contradicted == 0
 
 
 def test_bare_question_detection():
     assert is_bare_question("Was George Washington a criminal?")
+    assert is_bare_question("was George Washington a criminal")
     assert is_bare_question("How tall is Mount Everest?")
+    assert not is_bare_question("George Washington was a criminal.")
+    assert not is_bare_question("garlic lowers blood pressure")
     assert not is_bare_question("He was never charged. Was he a criminal?")
     assert not is_bare_question("17 * 24 = 408")
     assert not is_bare_question("Hi?")
@@ -202,8 +281,10 @@ def test_failed_draft_returns_503_and_does_not_spend_the_free_check():
         body = ok.json()
         assert body["mode"] == "text"
         assert body["draft_answer"] is None
-        assert set(body["synopsis"]) == {"rating", "summary", "caveats", "unchecked_count"}
+        assert set(body["synopsis"]) == {"rating", "summary", "tldr", "caveats", "unchecked_count", "counts"}
         assert body["synopsis"]["rating"] == "Accurate"
+        assert body["synopsis"]["tldr"]
+        assert body["synopsis"]["counts"]["supported"] == 1
         verify = http.post("/v1/verify", json={"text": "2 + 2 = 4"}, headers={"X-Client-Fingerprint": "draft-verify"})
         assert verify.status_code == 200
         saved = verify.json()

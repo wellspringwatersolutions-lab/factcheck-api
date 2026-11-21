@@ -11,7 +11,7 @@ import re
 import time
 
 from factcheck.llm import LLMError, estimate_cost, loads_object
-from factcheck.schemas import ClaimOut, SynopsisOut
+from factcheck.schemas import ClaimOut, SynopsisCounts, SynopsisOut
 
 _RATINGS = (
     "Accurate",
@@ -38,12 +38,14 @@ _STOP = {
     "unverified", "hypothesis", "answer", "question", "hold", "holds", "been", "were",
     "technically", "never", "does",
 }
+_ABSTAIN = "There wasn't enough evidence to settle this."
 _INSTRUCTION = """You phrase a veracity synopsis. You do not decide it.
-The rating is already fixed and must be the first words: {rating}
-Write one to three plain sentences that answer the question from the claim verdicts and cited quotes below.
+The rating is already fixed and must be the first words of summary: {rating}
+Write summary as one to three plain sentences that answer the question from the claim verdicts and cited quotes below.
+Also write tldr as one plain-English sentence of at most 30 words that opens the bottom line.
 Do not add any person, place, date, number, or event that is not written in the brief.
-If the rating is "Not enough evidence", say that plainly and do not sound confident.
-Return JSON {{"summary": "..."}}"""
+If the rating is "Not enough evidence", both summary and tldr must say there was not enough evidence, and must not sound confident.
+Return JSON {{"summary": "...", "tldr": "..."}}"""
 
 
 def _unchecked(claim: ClaimOut) -> bool:
@@ -241,6 +243,50 @@ def _brief(rating: str, question: str | None, claims: list[ClaimOut]) -> str:
     return "\n".join(lines)
 
 
+def claim_counts(claims: list[ClaimOut]) -> SynopsisCounts:
+    counts = SynopsisCounts()
+    for claim in claims:
+        if _unchecked(claim):
+            counts.not_checked += 1
+        elif claim.verdict == "Hypothesis":
+            counts.hypothesis += 1
+        elif claim.claim_type == "opinion":
+            counts.opinion += 1
+        elif claim.verdict == "Supported":
+            counts.supported += 1
+        elif claim.verdict == "Contradicted":
+            counts.contradicted += 1
+        elif claim.verdict == "Conflicting":
+            counts.conflicting += 1
+        else:
+            counts.unverified += 1
+    return counts
+
+
+def _word_count(text: str) -> int:
+    return len(re.findall(r"\b[\w']+\b", text or ""))
+
+
+def fallback_tldr(rating: str, summary: str) -> str:
+    """One sentence. Not enough evidence uses a fixed line. Otherwise the first content sentence."""
+    if rating == "Not enough evidence":
+        return _ABSTAIN
+    parts = [part.strip() for part in re.split(r"(?<=[.!?])\s+", summary or "") if part.strip()]
+    chosen = ""
+    for part in parts:
+        if part.rstrip(".").lower() != rating.lower():
+            chosen = part
+            break
+    if not chosen and parts:
+        chosen = parts[0]
+    words = chosen.split()
+    if len(words) > 30:
+        chosen = " ".join(words[:30]).rstrip(",;:")
+    if chosen and chosen[-1] not in ".!?":
+        chosen += "."
+    return chosen or _ABSTAIN
+
+
 def grounded(summary: str, corpus: str) -> bool:
     """Reject a phrasing that names a number or content word absent from the brief."""
     if not summary or len(summary) > 700:
@@ -258,6 +304,23 @@ def grounded(summary: str, corpus: str) -> bool:
     return True
 
 
+def _says_not_enough(text: str) -> bool:
+    lowered = (text or "").lower()
+    return "not enough evidence" in lowered or "enough evidence to settle" in lowered or "wasn't enough evidence" in lowered
+
+
+def _accept_tldr(text: str, corpus: str, rating: str) -> bool:
+    cleaned = (text or "").strip()
+    if not cleaned or _word_count(cleaned) > 30:
+        return False
+    allowed = corpus
+    if rating == "Not enough evidence":
+        if not _says_not_enough(cleaned):
+            return False
+        allowed = f"{corpus}\n{_ABSTAIN}"
+    return grounded(cleaned, allowed)
+
+
 def build_synopsis(
     claims: list[ClaimOut],
     *,
@@ -267,6 +330,8 @@ def build_synopsis(
 ) -> SynopsisOut:
     rating, caveats, unchecked_count = rate_claims(claims)
     summary = fallback_summary(rating, question, claims, caveats, unchecked_count)
+    tldr = fallback_tldr(rating, summary)
+    counts = claim_counts(claims)
     # A contradiction is stated from the cited quote. Do not let a phrasing call rewrite it.
     contradicted = any(claim.verdict == "Contradicted" for claim in claims)
     remaining = None if deadline is None else deadline - time.monotonic()
@@ -276,12 +341,37 @@ def build_synopsis(
             phrased = phrasing(brief, rating)
         except Exception:  # noqa: BLE001 - a failed phrasing call must not fail the report
             phrased = None
-        if isinstance(phrased, str) and grounded(phrased, brief):
-            cleaned = phrased.strip()
+        summary_text, tldr_text = _phrased_parts(phrased)
+        if summary_text and grounded(summary_text, brief):
+            cleaned = summary_text.strip()
             if not cleaned.lower().startswith(rating.lower()):
                 cleaned = f"{rating}. {cleaned}"
             summary = cleaned
-    return SynopsisOut(rating=rating, summary=summary, caveats=caveats, unchecked_count=unchecked_count)
+        if tldr_text and _accept_tldr(tldr_text, brief, rating):
+            tldr = tldr_text.strip()
+            if tldr[-1] not in ".!?":
+                tldr += "."
+    return SynopsisOut(
+        rating=rating,
+        summary=summary,
+        tldr=tldr,
+        caveats=caveats,
+        unchecked_count=unchecked_count,
+        counts=counts,
+    )
+
+
+def _phrased_parts(phrased) -> tuple[str | None, str | None]:
+    if isinstance(phrased, str):
+        return phrased, None
+    if isinstance(phrased, dict):
+        summary = phrased.get("summary")
+        tldr = phrased.get("tldr")
+        return (
+            summary.strip() if isinstance(summary, str) and summary.strip() else None,
+            tldr.strip() if isinstance(tldr, str) and tldr.strip() else None,
+        )
+    return None, None
 
 
 class LLMSynopsis:
@@ -293,7 +383,7 @@ class LLMSynopsis:
         self.meter = meter
         self.settings = settings
 
-    def __call__(self, brief: str, rating: str) -> str | None:
+    def __call__(self, brief: str, rating: str) -> dict | None:
         try:
             result = self.client.complete(
                 model=self.model,
@@ -319,5 +409,13 @@ class LLMSynopsis:
             payload = loads_object(result)
         except (LLMError, ValueError, TypeError):
             return None
-        summary = payload.get("summary") if isinstance(payload, dict) else None
-        return summary.strip() if isinstance(summary, str) and summary.strip() else None
+        if not isinstance(payload, dict):
+            return None
+        summary = payload.get("summary")
+        tldr = payload.get("tldr")
+        if not isinstance(summary, str) or not summary.strip():
+            return None
+        return {
+            "summary": summary.strip(),
+            "tldr": tldr.strip() if isinstance(tldr, str) else "",
+        }

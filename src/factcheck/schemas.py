@@ -106,6 +106,16 @@ class DraftAnswer(BaseModel):
     text: str
 
 
+class SynopsisCounts(BaseModel):
+    supported: int = 0
+    contradicted: int = 0
+    conflicting: int = 0
+    unverified: int = 0
+    hypothesis: int = 0
+    opinion: int = 0
+    not_checked: int = 0
+
+
 class SynopsisOut(BaseModel):
     """Plain-language bottom line. The rating is fixed from the claim verdicts, not from a model."""
 
@@ -118,8 +128,10 @@ class SynopsisOut(BaseModel):
         "Not enough evidence",
     ]
     summary: str
+    tldr: str = ""
     caveats: list[str] = Field(default_factory=list)
     unchecked_count: int = 0
+    counts: SynopsisCounts = Field(default_factory=SynopsisCounts)
 
 
 class UsageOut(BaseModel):

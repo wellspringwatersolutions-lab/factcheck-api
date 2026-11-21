@@ -121,6 +121,7 @@ def _synopsis(verification: VerificationOut) -> str:
         '<section class="synopsis">',
         '<p class="kicker">Veracity synopsis</p>',
         f"<h2>{html.escape(synopsis.rating)}</h2>",
+        (f"<p><strong>{html.escape(synopsis.tldr)}</strong></p>" if synopsis.tldr else ""),
         f"<p>{html.escape(synopsis.summary)}</p>",
     ]
     if synopsis.caveats:
