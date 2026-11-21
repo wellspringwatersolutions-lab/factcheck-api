@@ -174,7 +174,7 @@ def heuristic_queries(text: str) -> list[str]:
             queries.append(query)
     if not queries and primary:
         queries.append(primary)
-    return queries[:3]
+    return queries[:2]
 
 
 def _accept(raw: list) -> list[str]:
@@ -190,7 +190,7 @@ def _accept(raw: list) -> list[str]:
         if len(query.split()) < 2 or query in kept:
             continue
         kept.append(query)
-        if len(kept) >= 3:
+        if len(kept) >= 2:
             break
     return kept
 
@@ -206,16 +206,19 @@ class QueryWriter:
         self.fallback = settings.judge_a_model
 
     def write(self, text: str) -> list[str]:
-        for model in (self.primary, self.fallback):
-            try:
-                payload = self._ask(model, text)
-            except (LLMError, TimeoutError, ValueError, TypeError, KeyError) as exc:
-                logger.warning("query writer %s failed: %s", model, exc)
-                continue
-            accepted = _accept(payload.get("queries") or [])
-            if accepted:
-                return accepted
-        return heuristic_queries(text)
+        """At most two keyword queries. A timeout becomes one deterministic query, not another model call."""
+        try:
+            payload = self._ask(self.primary, text)
+        except TimeoutError as exc:
+            logger.warning("query writer %s timed out: %s", self.primary, exc)
+            return heuristic_queries(text)[:1]
+        except (LLMError, ValueError, TypeError, KeyError) as exc:
+            logger.warning("query writer %s failed: %s", self.primary, exc)
+            payload = None
+        accepted = _accept((payload or {}).get("queries") or []) if isinstance(payload, dict) else []
+        if accepted:
+            return accepted[:2]
+        return heuristic_queries(text)[:1]
 
     def _ask(self, model: str, text: str) -> dict:
         result = self.client.complete(

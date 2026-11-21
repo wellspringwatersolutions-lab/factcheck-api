@@ -10,7 +10,7 @@ import httpx
 
 logger = logging.getLogger("factcheck")
 
-from factcheck.request_ctx import bind_context, note_retrieval
+from factcheck.request_ctx import CLAIM_CALL_CAP, bind_context, note_cost, reserve_retrieval
 from factcheck.types import Evidence
 
 _DATE = re.compile(r"(20\d{2}-\d{2}-\d{2})")
@@ -45,14 +45,18 @@ class DesearchRetriever:
         if path == "/news" and window:
             params["start_date"] = window["start_date"]
             params["end_date"] = window["end_date"]
+        if not reserve_retrieval():
+            logger.warning("desearch call cap reached before %s", path)
+            return []
         self.retrieval_calls += 1
-        note_retrieval(1)
         response = self.client.get(f"{self.base_url}{path}", params=params, headers=self._headers())
         response.raise_for_status()
         payload = response.json()
         header_cost = _cost_header(response)
         body_cost = float(payload.get("cost_usd") or 0) if isinstance(payload, dict) else 0.0
-        self.cost_usd += header_cost or body_cost
+        spent = header_cost or body_cost
+        self.cost_usd += spent
+        note_cost(spent)
         rows = payload.get("data") or [] if isinstance(payload, dict) else payload or []
         hits = []
         for row in rows[:limit]:
@@ -72,20 +76,21 @@ class DesearchRetriever:
         return self._rows("/web", query, limit, None)
 
     def _post_search(self, query: str, limit: int, window: dict | None) -> list[Evidence]:
-        """POST /search. GET /news is gone and returns 404."""
-        count = 10 if limit <= 10 else 15 if limit <= 15 else 20
-        body: dict = {"query": query, "count": count, "highlights": True}
-        if window:
-            body["start_date"] = window["start_date"]
-            body["end_date"] = window["end_date"]
+        """POST /search. The date window is not sent: Desearch would drop undated pages."""
+        del window
+        if not reserve_retrieval():
+            logger.warning("desearch call cap reached before /search")
+            return []
+        body: dict = {"query": query, "count": min(10, max(limit, 1)), "highlights": True}
         self.retrieval_calls += 1
-        note_retrieval(1)
         response = self.client.post(f"{self.base_url}/search", json=body, headers=self._headers())
         response.raise_for_status()
         payload = response.json()
         header_cost = _cost_header(response)
         body_cost = float(payload.get("cost_usd") or 0) if isinstance(payload, dict) else 0.0
-        self.cost_usd += header_cost or body_cost
+        spent = header_cost or body_cost
+        self.cost_usd += spent
+        note_cost(spent)
         rows = payload.get("results") or [] if isinstance(payload, dict) else []
         hits = []
         for row in rows[:limit]:
@@ -105,31 +110,35 @@ class DesearchRetriever:
             )
         return [hit for hit in hits if hit.url]
 
-    def search_web_and_news(self, queries: list[str], *, limit: int = 6, window: dict | None = None) -> list[Evidence]:
-        """Keyword results from GET /web and dated results from POST /search. Never GET /news."""
+    def search_web_and_news(self, queries: list[str], *, limit: int = 10, window: dict | None = None) -> list[Evidence]:
+        """A dated claim uses POST /search. Anything else uses GET /web. Never both, never GET /news."""
         hits: list[Evidence] = []
         seen: set[str] = set()
+        made = 0
         for query in queries:
+            if made >= CLAIM_CALL_CAP:
+                logger.warning("desearch claim cap %s", CLAIM_CALL_CAP)
+                break
             cleaned = " ".join((query or "").split())
             if not cleaned:
                 continue
-            batches = []
             try:
-                batches.append(self._rows("/web", cleaned, limit, None))
+                if window:
+                    batch = self._post_search(cleaned, min(limit, 10), window)
+                else:
+                    batch = self._rows("/web", cleaned, min(limit, 10), None)
             except Exception as exc:  # noqa: BLE001
-                logger.warning("desearch /web failed: %s", exc.__class__.__name__)
-            try:
-                batches.append(self._post_search(cleaned, limit, window))
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("desearch /search failed: %s", exc.__class__.__name__)
-            for batch in batches:
-                for hit in batch:
-                    key = hit.url.split("#")[0].rstrip("/")
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    hits.append(hit)
-        return hits[: max(limit, 8)]
+                logger.warning("desearch query failed: %s", exc.__class__.__name__)
+                continue
+            made += 1
+            logger.warning("desearch query=%r returned=%d dated=%s", cleaned, len(batch), bool(window))
+            for hit in batch:
+                key = hit.url.split("#")[0].rstrip("/")
+                if key in seen:
+                    continue
+                seen.add(key)
+                hits.append(hit)
+        return hits[:10]
 
     def extract(self, url: str) -> str:
         response = self.client.get(

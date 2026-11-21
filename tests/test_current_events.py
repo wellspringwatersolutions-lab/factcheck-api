@@ -127,7 +127,7 @@ def test_recent_claims_use_desearch_search_and_long_text_gets_75_seconds():
         ["FORTRESS America Hegseth 90 days bases hack"],
         window=None,
     )
-    assert seen == ["/web", "/search"]
+    assert seen == ["/web"]
     settings = Settings(_env_file=None, llm_mode="mock")
     assert settings.max_checked_claims == 10
     assert settings.check_concurrency == 6

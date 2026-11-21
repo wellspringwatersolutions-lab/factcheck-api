@@ -42,7 +42,11 @@ class Sentence:
 
 
 _CLAUSE_VERB = re.compile(
-    r"\b(is|are|was|were|be|been|has|have|had|do|does|did|will|can|may|must|shall)\b|\b[a-z]{4,}(?:ed|ing)\b",
+    r"\b(is|are|was|were|be|been|has|have|had|do|does|did|will|can|may|must|shall|advise|advises|recommend|recommends|warn|warns|say|says|told|urge|urges)\b|\b[a-z]{4,}(?:ed|ing)\b",
+    re.I,
+)
+_SHARED = re.compile(
+    r"^(?P<head>.+?)\s+(?P<verb>advise|advises|recommend|recommends|warn|warns|warned|told|urge|urges|issued|say|says|require|requires)\b(?P<tail>.*)$",
     re.I,
 )
 
@@ -52,12 +56,33 @@ def _is_clause(text: str) -> bool:
     return len(words) >= 5 and bool(_CLAUSE_VERB.search(text))
 
 
+def split_shared_predicate(sentence: str) -> list[str]:
+    """'The EU, the UK, and Nordic countries advise X' becomes one claim per government."""
+    match = _SHARED.match((sentence or "").strip())
+    if match is None:
+        return []
+    head = match.group("head")
+    if "," not in head and " and " not in head.lower():
+        return []
+    subjects = [part.strip(" ,") for part in re.split(r",|\band\b", head, flags=re.I)]
+    subjects = [part for part in subjects if part and part.lower() not in {"the", "a", "an"}]
+    if len(subjects) < 2:
+        return []
+    verb = match.group("verb")
+    tail = match.group("tail") or ""
+    return [f"{subject} {verb}{tail}".strip() for subject in subjects]
+
+
 def split_compounds(sentence: str) -> list[str]:
     """Split on semicolons, and on 'and' only when both sides are clauses."""
     pieces: list[str] = []
     for chunk in re.split(r";\s*", sentence or ""):
         chunk = chunk.strip()
         if not chunk:
+            continue
+        shared = split_shared_predicate(chunk)
+        if len(shared) >= 2:
+            pieces.extend(shared)
             continue
         parts = [part.strip() for part in re.split(r"\s+\band\b\s+", chunk, flags=re.I) if part.strip()]
         if len(parts) >= 2 and all(_is_clause(part) for part in parts):

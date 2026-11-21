@@ -16,18 +16,20 @@ from factcheck.aggregate import RULES_VERSION, decide
 from factcheck.categories import CATEGORIES, EFFORT_LIMITS, effort_for, normalize_claim
 from factcheck.checks import UrlChecker, apply_debunk_labels, apply_passage_checks, passage_check_rows
 from factcheck.cleanup import focus_query, is_bare_question, peel_leading_question, priority, split_dialogue
-from factcheck.extract import heuristic_extract, select_key_points
+from factcheck.extract import heuristic_extract, select_key_points, split_compounds
 from factcheck.queries import heuristic_queries, news_window
 from factcheck.request_ctx import (
     add_phase,
     begin_request,
     bind_context,
     current_request,
+    drop_counts,
     end_request,
     phase_seconds,
     retrieval_calls,
     set_phase,
 )
+from factcheck.retain import screen_hits
 from factcheck.compute import recompute
 from factcheck.credibility import annotate, dedupe_syndicated, dedupe_urls, drop_circular
 from factcheck.judge import apply_verified_labels
@@ -51,6 +53,30 @@ from factcheck.textutil import is_fragile, jaccard, normalize_text, overlap
 from factcheck.types import Evidence, ExtractedClaim, UsageMeter
 
 logger = logging.getLogger("factcheck")
+
+
+def _split_key_points(claims: list) -> list:
+    """One checkable fact per point, then the six most specific."""
+    pieces = []
+    for claim in claims:
+        parts = split_compounds(claim.text)
+        if len(parts) <= 1:
+            pieces.append(claim)
+            continue
+        for part in parts:
+            child = ExtractedClaim(
+                text=part,
+                claim_type=claim.claim_type,
+                claim_category=claim.claim_category,
+                time_sensitive=claim.time_sensitive,
+                scientific=claim.scientific,
+                attribution=claim.attribution,
+                fragile=claim.fragile,
+                hypothesis=claim.hypothesis,
+                span=claim.span or claim.text,
+            )
+            pieces.append(normalize_claim(child))
+    return select_key_points(pieces, 6)
 
 
 def _call_with_timeout(func, seconds: float, *args):
@@ -279,7 +305,7 @@ class VerificationService:
                     warnings = [f"extraction_fallback:{exc.__class__.__name__}"]
                 extracted = [normalize_claim(item) for item in extracted]
             if check_claims is None and preclassified is None:
-                extracted = select_key_points(extracted, 6)
+                extracted = _split_key_points(extracted)
             set_phase("extract", time.monotonic() - t_extract)
             # Retrieval keeps 25s and the two-pass review keeps 16s on a real request.
             # A shorter budget, including a zero budget, is left alone so the request can stop.
@@ -373,8 +399,8 @@ class VerificationService:
                 logger.warning("query writer failed %s", exc.__class__.__name__)
                 written = []
             if written:
-                return written[:3]
-        written = heuristic_queries(text)
+                return written[:2]
+        written = heuristic_queries(text)[:2]
         return written or [focus_query(text)]
 
     def _draft(self, question: str) -> tuple[str, str, str]:
@@ -524,26 +550,34 @@ class VerificationService:
         limit = EFFORT_LIMITS[effort]["search"]
         scientific = any(claim.scientific or claim.claim_category in {"T2", "T3", "T4"} for claim in claims)
         categories = [claim.claim_category for claim in claims]
-        before = getattr(self.retriever, "cost_usd", 0.0)
         before_calls = retrieval_calls()
         t_retrieve = time.monotonic()
         hits = []
         seen_urls: set[str] = set()
         for claim in claims:
-            queries = self._search_queries(claim.text)
+            queries = self._search_queries(claim.text)[:2]
             window = news_window(claim.text)
             found = list(
                 self.retriever.search(
                     queries[0],
-                    limit=limit,
+                    limit=min(limit, 10),
                     scientific=scientific,
                     categories=categories,
-                    extra_queries=queries[1:],
+                    extra_queries=queries[1:2],
                     window=window,
                     broad=True,
                 )
             )
-            for hit in found:
+            kept, reasons = screen_hits(claim.text, found, window)
+            logger.warning(
+                "retrieval claim=%r queries=%s returned=%d kept=%d drops=%s",
+                claim.text[:160],
+                queries,
+                len(found),
+                len(kept),
+                reasons,
+            )
+            for hit in kept:
                 key = (hit.url or "").split("#")[0].rstrip("/")
                 if not key or key in seen_urls:
                     continue
@@ -551,8 +585,6 @@ class VerificationService:
                 hits.append(hit)
         add_phase("retrieve", time.monotonic() - t_retrieve)
         meter.retrieval_calls += max(0, retrieval_calls() - before_calls)
-        with self._meter_lock:
-            meter.add_usd(getattr(self.retriever, "cost_usd", 0.0) - before, retriever=True)
         warnings.extend(getattr(self.retriever, "warnings", [])[-3:])
         hits = dedupe_urls(hits)
         draft = current_request().draft_text if current_request() is not None else ""
@@ -742,6 +774,7 @@ class VerificationService:
                 estimated_cost_usd=round(meter.estimated_cost_usd, 6),
                 retriever_cost_usd=round(meter.retriever_cost_usd, 6),
                 retrieval_calls=int(getattr(meter, "retrieval_calls", 0)),
+                drops=drop_counts(),
                 credits_charged=credits,
                 tier=tier,
                 models=meter.models,

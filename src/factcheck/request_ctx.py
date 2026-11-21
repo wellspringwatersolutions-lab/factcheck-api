@@ -20,6 +20,7 @@ class RequestState:
     draft_text: str = ""
     on_progress: object | None = None
     retrieval_calls: int = 0
+    drops: dict[str, int] = field(default_factory=dict)
     lock: threading.Lock = field(default_factory=threading.Lock)
 
 
@@ -48,6 +49,48 @@ def charge_tokens(fallback: UsageMeter | None, **kwargs) -> None:
     meter = active_meter(fallback)
     if meter is not None:
         meter.add_tokens(**kwargs)
+
+
+CHECK_CALL_CAP = 60
+CLAIM_CALL_CAP = 12
+
+
+def note_cost(amount: float) -> None:
+    """Add retriever spend to this request only. The shared client counter is not a delta."""
+    if amount <= 0:
+        return
+    meter = active_meter(None)
+    if meter is not None:
+        meter.add_usd(amount, retriever=True)
+
+
+def note_drop(reason: str, count: int = 1) -> None:
+    state = _CURRENT.get()
+    if state is None or count <= 0:
+        return
+    with state.lock:
+        state.drops[reason] = state.drops.get(reason, 0) + count
+
+
+def drop_counts() -> dict[str, int]:
+    state = _CURRENT.get()
+    if state is None:
+        return {}
+    with state.lock:
+        return dict(state.drops)
+
+
+def reserve_retrieval() -> bool:
+    """Count one Desearch call. False once this check has used its cap."""
+    state = _CURRENT.get()
+    if state is None:
+        return True
+    with state.lock:
+        if state.retrieval_calls >= CHECK_CALL_CAP:
+            state.drops["call_cap"] = state.drops.get("call_cap", 0) + 1
+            return False
+        state.retrieval_calls += 1
+        return True
 
 
 def note_retrieval(count: int = 1) -> None:

@@ -164,6 +164,7 @@ class UsageOut(BaseModel):
     estimated_cost_usd: float = 0.0
     retriever_cost_usd: float = 0.0
     retrieval_calls: int = 0
+    drops: dict[str, int] = Field(default_factory=dict)
     credits_charged: float = 0.0
     tier: str = "free"
     models: dict[str, str] = Field(default_factory=dict)

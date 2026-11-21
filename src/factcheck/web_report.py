@@ -59,7 +59,8 @@ def to_check_report(result: VerificationOut, input_text: str) -> dict:
             verdict = "unverified"
         sources = []
         for source in claim.sources:
-            if not source.quote and not source.used:
+            quote = source.quote or source.snippet
+            if not quote and not source.used:
                 continue
             sources.append(
                 {
@@ -68,7 +69,7 @@ def to_check_report(result: VerificationOut, input_text: str) -> dict:
                     "domain": hostname(source.url),
                     "checked_on": _checked_on(source.published_at),
                     "published_date": source.published_at,
-                    "quote": source.quote or source.snippet,
+                    "quote": quote,
                     "source_type": _source_type(source.source_type, source.url),
                 }
             )
@@ -177,6 +178,7 @@ def to_check_report(result: VerificationOut, input_text: str) -> dict:
             "estimated_cost_usd": result.usage.estimated_cost_usd,
             "retriever_cost_usd": result.usage.retriever_cost_usd,
             "retrieval_calls": result.usage.retrieval_calls,
+            "drops": dict(result.usage.drops),
             "credits_charged": result.usage.credits_charged,
             "tier": result.usage.tier,
             "models": dict(result.usage.models),

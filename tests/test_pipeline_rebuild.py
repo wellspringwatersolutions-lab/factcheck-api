@@ -7,6 +7,7 @@ from factcheck.aggregate import decide
 from factcheck.checks import apply_debunk_labels
 from factcheck.credibility import grade_for
 from factcheck.extract import heuristic_extract, select_key_points, split_compounds
+from factcheck.retain import screen_hits
 from factcheck.synopsis import complete_sentence, fallback_tldr
 from factcheck.queries import heuristic_queries, news_window
 from factcheck.retrievers import DesearchRetriever
@@ -71,8 +72,10 @@ def test_desearch_runs_web_and_post_search_without_a_week_window():
         window=news_window("In October 2026 France saw a supermarket refrigeration cyberattack."),
     )
     assert not any(path == "/news" for path, _payload in seen)
+    assert not any(path == "/web" for path, _payload in seen)
     posted = [body for path, body in seen if path == "/search"]
-    assert posted and posted[0]["start_date"] == "2026-09-17" and posted[0]["end_date"] == "2026-11-14"
+    assert posted and posted[0]["count"] == 10
+    assert "start_date" not in posted[0] and "end_date" not in posted[0]
     assert "time" not in posted[0]
     dated = next(hit for hit in hits if hit.published_at == "2026-10-12")
     assert dated.url == "https://www.reuters.com/france"
@@ -281,3 +284,59 @@ def test_concurrent_checks_do_not_share_usage():
     assert first[0].usage.input_tokens == 10
     assert second[0].usage.input_tokens == 10
     assert first[0].verification_id != second[0].verification_id
+
+
+_FOOD = [
+    "The US government has not told civilians to hoard 90 days of food.",
+    "The EU, the UK, and Nordic countries advise households to keep a 72-hour emergency kit.",
+    "Official US advice is a 72-hour kit.",
+    "The GAO warned about ransomware on state computer systems.",
+]
+
+
+def _food_hits() -> list[Evidence]:
+    snopes = "Snopes rating: False. The US government has not told civilians to hoard 90 days of food."
+    lead = "Lead Stories found no evidence the government told civilians to hoard 90 days of food."
+    ready = "Ready.gov says the official advice is a 72-hour emergency kit of water and food."
+    gao = "The GAO warned about ransomware on state computer systems in a public report."
+    return [
+        Evidence(url="https://www.snopes.com/fact-check/food-hoard", title="Snopes", snippet=snopes, page_text=snopes, source_type="fact_checker", grade="B"),
+        Evidence(url="https://www.snopes.com/fact-check/food-hoard", title="Snopes copy", snippet=snopes, page_text=snopes, source_type="fact_checker", grade="B"),
+        Evidence(url="https://leadstories.com/hoard", title="Lead Stories", snippet=lead, page_text=lead, published_at="2024-03-01", source_type="fact_checker", grade="B"),
+        Evidence(url="https://www.ready.gov/kit", title="Ready.gov", snippet=ready, page_text=ready, grade="A", source_type="primary"),
+        Evidence(url="https://www.gao.gov/ransomware", title="GAO", snippet=gao, page_text=gao, published_at="2023-06-01", grade="A", source_type="primary"),
+        Evidence(url="https://random-shop.example/crossword", title="Puzzle", snippet="A crossword puzzle appeared in the Sunday paper.", page_text="A crossword puzzle appeared in the Sunday paper.", grade="E"),
+    ]
+
+
+def test_food_paste_keeps_undated_fact_checkers_and_official_pages():
+    window = news_window("Households were told this in mid-October 2026.")
+    assert window["start_date"].startswith("2026-09")
+    hits = _food_hits()
+    denial, denial_drops = screen_hits(_FOOD[0], hits, window)
+    urls = {hit.url for hit in denial}
+    assert "https://www.snopes.com/fact-check/food-hoard" in urls
+    assert "https://leadstories.com/hoard" in urls
+    assert "date_window" not in denial_drops
+    assert denial_drops.get("dedupe", 0) >= 1
+    kit, _kit_drops = screen_hits(_FOOD[2], hits, window)
+    assert any(hit.url.endswith("ready.gov/kit") for hit in kit)
+    gao, gao_drops = screen_hits(_FOOD[3], hits, window)
+    assert any("gao.gov" in hit.url for hit in gao)
+    assert "date_window" not in gao_drops
+    assert any(hit.url.endswith("crossword") for hit in hits)
+    assert not any(hit.url.endswith("crossword") for hit in denial + kit + gao)
+    parts = split_compounds(_FOOD[1])
+    assert len(parts) >= 3
+    assert any(part.lower().startswith("the eu") for part in parts)
+    assert any("uk" in part.lower() for part in parts)
+    service, retriever, _, _ = make_service(hits=hits)
+    result = service.verify(text=None, claims=_FOOD, client=client(), charge=False)
+    report = to_check_report(result, "\n".join(_FOOD))
+    found = {source["url"] for claim in report["claims"] for source in claim["sources"]}
+    assert "https://www.snopes.com/fact-check/food-hoard" in found
+    assert "https://www.ready.gov/kit" in found
+    assert "https://www.gao.gov/ransomware" in found
+    assert "drops" in report["usage"]
+    assert len(retriever.queries) <= 8
+    assert all(len(query.split()) <= 12 for query in retriever.extra_queries)
