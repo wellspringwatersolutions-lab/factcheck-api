@@ -104,16 +104,17 @@ def rate_claims(claims: list[ClaimOut]) -> tuple[str, list[str], int]:
     facts = _checked_facts(claims)
     if not facts:
         return "Not enough evidence", caveats, unchecked_count
-    decided = [claim for claim in facts if claim.verdict in {"Supported", "Contradicted", "Conflicting"}]
+    decided = [claim for claim in facts if claim.verdict in {"Supported", "likely_true", "Contradicted", "Conflicting"}]
     unverified = [claim for claim in facts if claim.verdict in {"Unverified", "Unsupported", None}]
     if not decided or len(unverified) >= len(decided):
         return "Not enough evidence", caveats, unchecked_count
     supported = [claim for claim in decided if claim.verdict == "Supported"]
+    likely = [claim for claim in decided if claim.verdict == "likely_true"]
     contradicted = [claim for claim in decided if claim.verdict == "Contradicted"]
     conflicting = [claim for claim in decided if claim.verdict == "Conflicting"]
     if not any(_weight(claim) >= 0.45 for claim in decided):
         return "Not enough evidence", caveats, unchecked_count
-    support_w = sum(_weight(claim) for claim in supported)
+    support_w = sum(_weight(claim) for claim in supported) + sum(_weight(claim) for claim in likely)
     contra_w = sum(_weight(claim) for claim in contradicted) + sum(_weight(claim) for claim in conflicting)
     total = support_w + contra_w
     if total <= 0:
@@ -121,7 +122,7 @@ def rate_claims(claims: list[ClaimOut]) -> tuple[str, list[str], int]:
     support_share = support_w / total
     contra_share = contra_w / total
     if contra_w == 0 and support_share >= 0.999:
-        rating = "Mostly accurate" if unverified or _has_nuance(supported) else "Accurate"
+        rating = "Mostly accurate" if unverified or likely or _has_nuance(supported) else "Accurate"
     elif support_share >= 0.6 and contra_share < 0.4:
         rating = "Mostly accurate"
     elif contra_share >= 0.85 and support_w == 0 and not unverified:
@@ -254,6 +255,8 @@ def claim_counts(claims: list[ClaimOut]) -> SynopsisCounts:
             counts.opinion += 1
         elif claim.verdict == "Supported":
             counts.supported += 1
+        elif claim.verdict == "likely_true":
+            counts.likely_true += 1
         elif claim.verdict == "Contradicted":
             counts.contradicted += 1
         elif claim.verdict == "Conflicting":

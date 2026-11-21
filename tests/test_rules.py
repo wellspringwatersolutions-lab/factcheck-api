@@ -162,7 +162,7 @@ def test_eiffel_html_noise_is_supported_by_the_article_sentence():
     )
     result = service.verify(text=None, claims=["The Eiffel Tower is in Paris."], client=client(), charge=False)
     claim = result.claims[0]
-    assert claim.verdict == "Unverified"
+    assert claim.verdict == "likely_true"
     assert claim.strength_of_support < 0.7
     assert claim.sources[0].quote
     assert "function" not in claim.sources[0].quote

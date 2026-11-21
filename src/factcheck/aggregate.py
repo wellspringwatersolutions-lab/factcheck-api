@@ -12,7 +12,7 @@ from factcheck.credibility import is_encyclopedia, source_weight
 from factcheck.textutil import hostname
 from factcheck.types import Evidence
 
-RULES_VERSION = "4"
+RULES_VERSION = "5"
 
 STRENGTH_NOTE = (
     "Strength of support is based on the evidence: source grade, how many independent "
@@ -148,6 +148,39 @@ def _body_quote(passage: Evidence) -> bool:
     return " ".join(quote.lower().split()) != title
 
 
+def _reputable(passage: Evidence) -> bool:
+    """Tier B or better: major news, government, or an encyclopedia. Trade press stays out."""
+    if passage.grade not in {"A", "B"}:
+        return False
+    if passage.source_type in {"anecdote", "eyewitness", "syndicated"}:
+        return False
+    return True
+
+
+def _backs_substance(claim_text: str, passage: Evidence) -> bool:
+    if not _reputable(passage):
+        return False
+    text = (passage.quote or passage.snippet or passage.page_text or "").strip()
+    if len(text) < 40 or _DATELINE.match(text):
+        return False
+    if passage.entailment == "contradicts":
+        return False
+    if passage.entailment == "entails":
+        return True
+    from factcheck.textutil import overlap
+
+    return overlap(claim_text, text) >= 0.4
+
+
+def _mark_likely(passages: list[Evidence]) -> None:
+    for passage in passages:
+        if not passage.quote:
+            passage.quote = (passage.snippet or passage.page_text or "")[:400]
+        passage.used = True
+        if passage.entailment not in {"entails", "contradicts"}:
+            passage.entailment = "entails"
+
+
 def _two_reliable_news(passages: list[Evidence]) -> bool:
     origins = {
         passage.origin_id or hostname(passage.url)
@@ -281,6 +314,19 @@ def decide(
             )
 
     if not supporting and not contradicting:
+        backers = [item for item in passages if _backs_substance(claim_text, item)]
+        if backers:
+            _mark_likely(backers[:2])
+            return Decision(
+                verdict="likely_true",
+                strength_of_support=0.58,
+                reasoning=(
+                    "Likely true. Reputable sources back the substance of the claim, "
+                    "but there is no exact entailing quote to mark it supported. " + STRENGTH_NOTE
+                ),
+                needs_human_review=high_stakes,
+                supporting_quotes=[item.quote for item in backers if item.quote][:2],
+            )
         return Decision(
             verdict="Unverified",
             strength_of_support=0.15,
@@ -342,6 +388,24 @@ def decide(
                 ),
                 needs_human_review=high_stakes,
                 supporting_quotes=[item.quote for item in upper if item.quote],
+            )
+        reputable = [item for item in supporting if _reputable(item)]
+        if reputable:
+            _mark_likely(reputable[:2])
+            return Decision(
+                verdict="likely_true",
+                strength_of_support=0.62,
+                reasoning=(
+                    "Likely true. "
+                    + (
+                        "One reputable source quotes a passage that lines up with the claim. "
+                        if len(reputable) == 1
+                        else "Reputable sources back the claim, but not as two independent exact quotes. "
+                    )
+                    + STRENGTH_NOTE
+                ),
+                needs_human_review=high_stakes,
+                supporting_quotes=[item.quote for item in reputable if item.quote][:2],
             )
         return Decision(
             verdict="Unverified",

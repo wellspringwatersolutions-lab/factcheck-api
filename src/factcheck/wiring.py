@@ -16,6 +16,7 @@ from factcheck.retrievers import (
     GoogleFactCheckRetriever,
     restcountries_fetcher,
 )
+from factcheck.queries import QueryWriter
 from factcheck.questions import AnswerDrafter
 from factcheck.review import TwoPassReview
 from factcheck.references import ClaimBuster, ReferenceBundle
@@ -59,6 +60,7 @@ def build_service(settings: Settings):
     drafter = None
     synopsizer = None
     reviewer = None
+    query_writer = None
     if settings.llm_mode == "auto" and client is None:
         pass
     if client is None:
@@ -74,6 +76,7 @@ def build_service(settings: Settings):
         drafter = AnswerDrafter(client, settings.extract_model, meter, settings)
         synopsizer = LLMSynopsis(client, settings.extract_model, meter, settings)
         reviewer = TwoPassReview(client, settings, meter)
+        query_writer = QueryWriter(client, settings, meter)
 
     providers = []
     desearch = None
@@ -135,4 +138,5 @@ def build_service(settings: Settings):
         drafter=drafter,
         synopsizer=synopsizer,
         reviewer=reviewer,
+        query_writer=query_writer,
     )

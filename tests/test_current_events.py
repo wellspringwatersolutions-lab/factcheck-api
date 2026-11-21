@@ -107,16 +107,21 @@ def test_extraction_drops_headings_and_repairs_json():
 
 
 def test_recent_claims_use_desearch_news_and_long_text_gets_75_seconds():
+    seen = []
+
     def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.path == "/news"
-        assert request.url.params["time"] == "week"
-        assert "FORTRESS" in request.url.params["query"]
-        assert "gives Hegseth" not in request.url.params["query"]
+        seen.append((request.url.path, dict(request.url.params)))
+        assert request.url.path in {"/web", "/news"}
+        assert "time" not in request.url.params
+        assert "gives" not in request.url.params["query"]
+        assert "In " not in request.url.params["query"]
         return httpx.Response(200, json={"data": []}, headers={"X-Desearch-Cost-Usd": "0"})
 
-    DesearchRetriever("k", client=httpx.Client(transport=httpx.MockTransport(handler))).search(
-        "The FORTRESS America order gives Hegseth 90 days to harden bases after the hack."
+    DesearchRetriever("k", client=httpx.Client(transport=httpx.MockTransport(handler))).search_web_and_news(
+        ["FORTRESS America Hegseth 90 days bases hack"],
+        window=None,
     )
+    assert {path for path, _params in seen} == {"/web", "/news"}
     settings = Settings(_env_file=None, llm_mode="mock")
     assert settings.max_checked_claims == 10
     assert settings.check_concurrency == 6

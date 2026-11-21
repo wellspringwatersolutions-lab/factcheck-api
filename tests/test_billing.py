@@ -9,7 +9,7 @@ class _CostRetriever:
         self.cost_usd = 0.0
         self.warnings: list[str] = []
 
-    def search(self, query: str, *, limit: int = 6, scientific: bool = False, categories: list[str] | None = None):
+    def search(self, query: str, *, limit: int = 6, scientific: bool = False, categories: list[str] | None = None, **_ignored):
         self.cost_usd += 0.5
         return []
 

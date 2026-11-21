@@ -97,13 +97,16 @@ def to_check_report(result: VerificationOut, input_text: str) -> dict:
                     for item in claim.mainstream_check.checks
                 ]
             }
-        start = input_text.find(claim.text) if input_text else -1
+        needle = claim.span if claim.span and input_text and claim.span in input_text else claim.text
+        start = input_text.find(needle) if input_text else -1
         category = "prediction" if claim.verdict == "Hypothesis" else _SITE_CATEGORY.get(claim.claim_category, "event")
         row = {
             "claim": claim.text,
             "claim_type": claim.claim_type,
             "claim_category": category,
             "verdict": verdict,
+            "verdict_label": "Likely true" if verdict == "likely_true" else verdict.replace("_", " ").title(),
+            "span": claim.span,
             "strength_of_support": claim.strength_of_support,
             "checked_at": claim.checked_at,
             "would_settle": claim.would_settle,
@@ -112,7 +115,7 @@ def to_check_report(result: VerificationOut, input_text: str) -> dict:
         }
         if start >= 0:
             row["start"] = start
-            row["end"] = start + len(claim.text)
+            row["end"] = start + len(needle)
         claims.append(row)
     synopsis = result.synopsis
     if synopsis is None:
@@ -127,6 +130,7 @@ def to_check_report(result: VerificationOut, input_text: str) -> dict:
                 "supported": 0,
                 "contradicted": 0,
                 "conflicting": 0,
+                "likely_true": 0,
                 "unverified": 0,
                 "hypothesis": 0,
                 "opinion": 0,
@@ -166,4 +170,14 @@ def to_check_report(result: VerificationOut, input_text: str) -> dict:
         "draft_answer": draft,
         "synopsis": synopsis_out,
         "review": review_out,
+        "usage": {
+            "input_tokens": result.usage.input_tokens,
+            "output_tokens": result.usage.output_tokens,
+            "estimated_cost_usd": result.usage.estimated_cost_usd,
+            "retriever_cost_usd": result.usage.retriever_cost_usd,
+            "retrieval_calls": result.usage.retrieval_calls,
+            "credits_charged": result.usage.credits_charged,
+            "tier": result.usage.tier,
+            "models": dict(result.usage.models),
+        },
     }

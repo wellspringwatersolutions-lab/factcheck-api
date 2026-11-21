@@ -17,8 +17,13 @@ class RecordingRetriever:
         self.cost_usd = 0.0
         self.warnings: list[str] = []
 
-    def search(self, query: str, *, limit: int = 6, scientific: bool = False, categories: list[str] | None = None):
+    def search(self, query: str, *, limit: int = 6, scientific: bool = False, categories: list[str] | None = None, extra_queries=None, window=None, broad: bool = False):
         self.queries.append(query)
+        self.extra_queries = [*getattr(self, "extra_queries", []), *(extra_queries or [])]
+        self.windows = [*getattr(self, "windows", []), window]
+        self.retrieval_calls = getattr(self, "retrieval_calls", 0) + 1
+        if broad:
+            self.retrieval_calls += len(extra_queries or [])
         return list(self.hits)[:limit]
 
 

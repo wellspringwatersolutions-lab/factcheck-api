@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from concurrent.futures import ThreadPoolExecutor, TimeoutError, as_completed
 
 import httpx
+
+logger = logging.getLogger("factcheck")
 
 from factcheck.types import Evidence
 
@@ -31,43 +34,62 @@ class DesearchRetriever:
         self.base_url = base_url.rstrip("/")
         self.client = client or httpx.Client(timeout=8.0)
         self.cost_usd = 0.0
+        self.retrieval_calls = 0
 
     def _headers(self) -> dict[str, str]:
         return {"Authorization": self.api_key}
 
-    def search(self, query: str, *, limit: int = 6) -> list[Evidence]:
-        from factcheck.cleanup import entity_query, is_current_event
-
-        recent = is_current_event(query)
-        path = "/news" if recent else "/web"
-        params = {"query": entity_query(query) if recent else query, "start": 0}
-        if recent:
-            params["time"] = "week"
-        response = self.client.get(
-            f"{self.base_url}{path}",
-            params=params,
-            headers=self._headers(),
-        )
+    def _rows(self, path: str, query: str, limit: int, window: dict | None) -> list[Evidence]:
+        params = {"query": query, "start": 0}
+        if path == "/news" and window:
+            params["start_date"] = window["start_date"]
+            params["end_date"] = window["end_date"]
+        self.retrieval_calls += 1
+        response = self.client.get(f"{self.base_url}{path}", params=params, headers=self._headers())
         response.raise_for_status()
         payload = response.json()
         header_cost = _cost_header(response)
         body_cost = float(payload.get("cost_usd") or 0) if isinstance(payload, dict) else 0.0
         self.cost_usd += header_cost or body_cost
-        if isinstance(payload, dict):
-            rows = payload.get("data") or []
-        else:
-            rows = payload or []
+        rows = payload.get("data") or [] if isinstance(payload, dict) else payload or []
         hits = []
         for row in rows[:limit]:
             hits.append(
                 Evidence(
                     url=row.get("link") or row.get("url") or "",
                     title=row.get("title") or "",
-                    snippet=row.get("snippet") or "",
+                    snippet=row.get("snippet") or row.get("highlight") or "",
+                    published_at=row.get("published_at") or row.get("published_date") or row.get("date"),
                     provider="desearch",
                 )
             )
         return [hit for hit in hits if hit.url]
+
+    def search(self, query: str, *, limit: int = 6) -> list[Evidence]:
+        """Web results only. Fact-check search uses search_web_and_news."""
+        return self._rows("/web", query, limit, None)
+
+    def search_web_and_news(self, queries: list[str], *, limit: int = 6, window: dict | None = None) -> list[Evidence]:
+        """Each keyword query is run on /web and /news. News is not limited to the past week."""
+        hits: list[Evidence] = []
+        seen: set[str] = set()
+        for query in queries:
+            cleaned = " ".join((query or "").split())
+            if not cleaned:
+                continue
+            for path in ("/web", "/news"):
+                try:
+                    batch = self._rows(path, cleaned, limit, window if path == "/news" else None)
+                except Exception as exc:  # noqa: BLE001 - one channel failing must not drop the other
+                    logger.warning("desearch %s failed: %s", path, exc.__class__.__name__)
+                    continue
+                for hit in batch:
+                    key = hit.url.split("#")[0].rstrip("/")
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    hits.append(hit)
+        return hits[: max(limit, 8)]
 
     def extract(self, url: str) -> str:
         response = self.client.get(
@@ -131,18 +153,36 @@ class CompositeRetriever:
         self.references = references
         self.warnings: list[str] = []
         self.timeout = 8.0
+        self.retrieval_calls = 0
 
     @property
     def cost_usd(self) -> float:
         return sum(getattr(provider, "cost_usd", 0.0) for provider in self.providers)
 
-    def search(self, query: str, *, limit: int = 6, scientific: bool = False, categories: list[str] | None = None) -> list[Evidence]:
-        jobs = [lambda provider=provider: provider.search(query, limit=limit) for provider in self.providers]
+    def search(
+        self,
+        query: str,
+        *,
+        limit: int = 6,
+        scientific: bool = False,
+        categories: list[str] | None = None,
+        extra_queries: list[str] | None = None,
+        window: dict | None = None,
+        broad: bool = False,
+    ) -> list[Evidence]:
+        jobs = []
+        for provider in self.providers:
+            if broad and hasattr(provider, "search_web_and_news"):
+                queries = [query, *(extra_queries or [])]
+                jobs.append(lambda provider=provider, queries=queries: provider.search_web_and_news(queries, limit=limit, window=window))
+            else:
+                jobs.append(lambda provider=provider: provider.search(query, limit=limit))
         if self.scholarly and (scientific or set(categories or []) & {"T2", "T3", "T4"}):
             jobs.append(lambda: self.scholarly.search(query, limit=limit, categories=categories or (["T2"] if scientific else [])))
         if self.references is not None:
             jobs.append(lambda: self.references.search(query, limit=limit, categories=categories))
         hits: list[Evidence] = []
+        before_calls = [getattr(provider, "retrieval_calls", 0) for provider in self.providers]
         if not jobs:
             return []
         with ThreadPoolExecutor(max_workers=min(4, len(jobs))) as pool:
@@ -159,6 +199,10 @@ class CompositeRetriever:
             self.warnings.extend(getattr(self.scholarly, "warnings", []))
         if self.references is not None:
             self.warnings.extend(getattr(self.references, "warnings", []))
+        self.retrieval_calls += sum(
+            getattr(provider, "retrieval_calls", 0) - previous
+            for provider, previous in zip(self.providers, before_calls)
+        )
         seen: set[str] = set()
         kept = []
         for hit in hits:
@@ -194,7 +238,7 @@ class CorpusRetriever:
         self.cost_usd = 0.0
         self.warnings: list[str] = []
 
-    def search(self, query: str, *, limit: int = 5, scientific: bool = False, categories: list[str] | None = None) -> list[Evidence]:
+    def search(self, query: str, *, limit: int = 5, scientific: bool = False, categories: list[str] | None = None, **_ignored) -> list[Evidence]:
         from factcheck.textutil import overlap
 
         ranked = sorted(self.documents, key=lambda doc: overlap(query, f"{doc.title} {doc.snippet}"), reverse=True)
@@ -205,7 +249,7 @@ class EmptyRetriever:
     cost_usd = 0.0
     warnings: list[str] = []
 
-    def search(self, query: str, *, limit: int = 6, scientific: bool = False, categories: list[str] | None = None) -> list[Evidence]:
+    def search(self, query: str, *, limit: int = 6, scientific: bool = False, categories: list[str] | None = None, **_ignored) -> list[Evidence]:
         return []
 
 

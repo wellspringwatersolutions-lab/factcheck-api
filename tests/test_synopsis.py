@@ -137,6 +137,7 @@ def test_counts_put_each_claim_in_one_bucket():
     counts = build_synopsis(rows).counts
     assert counts.model_dump() == {
         "supported": 1,
+        "likely_true": 0,
         "contradicted": 1,
         "conflicting": 1,
         "unverified": 1,

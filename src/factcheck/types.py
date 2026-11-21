@@ -15,6 +15,7 @@ class ExtractedClaim:
     attribution: str | None = None
     fragile: bool = False
     hypothesis: bool = False
+    span: str = ""
 
 
 @dataclass
@@ -92,6 +93,7 @@ class UsageMeter:
     output_tokens: int = 0
     estimated_cost_usd: float = 0.0
     retriever_cost_usd: float = 0.0
+    retrieval_calls: int = 0
     models: dict[str, str] = field(default_factory=dict)
 
     def add_tokens(self, *, model: str, provider: str, input_tokens: int, output_tokens: int, cost: float) -> None:

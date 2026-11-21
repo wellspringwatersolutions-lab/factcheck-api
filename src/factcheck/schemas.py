@@ -10,6 +10,7 @@ from factcheck.branding import SERVICE_NAME
 
 Verdict = Literal[
     "Supported",
+    "likely_true",
     "Contradicted",
     "Unverified",
     "Conflicting",
@@ -90,6 +91,7 @@ class ClaimOut(BaseModel):
     confidence: float = 0.0
     reasoning: str
     attribution: str | None = None
+    span: str = ""
     needs_human_review: bool = False
     hypothesis_status: HypothesisStatus | None = None
     would_settle: str = ""
@@ -112,6 +114,7 @@ class DraftAnswer(BaseModel):
 
 class SynopsisCounts(BaseModel):
     supported: int = 0
+    likely_true: int = 0
     contradicted: int = 0
     conflicting: int = 0
     unverified: int = 0
@@ -160,6 +163,7 @@ class UsageOut(BaseModel):
     output_tokens: int = 0
     estimated_cost_usd: float = 0.0
     retriever_cost_usd: float = 0.0
+    retrieval_calls: int = 0
     credits_charged: float = 0.0
     tier: str = "free"
     models: dict[str, str] = Field(default_factory=dict)

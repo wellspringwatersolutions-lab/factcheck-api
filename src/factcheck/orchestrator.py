@@ -16,7 +16,8 @@ from factcheck.aggregate import RULES_VERSION, decide
 from factcheck.categories import CATEGORIES, EFFORT_LIMITS, effort_for, normalize_claim
 from factcheck.checks import UrlChecker, apply_passage_checks, passage_check_rows
 from factcheck.cleanup import focus_query, is_bare_question, peel_leading_question, priority, split_dialogue
-from factcheck.extract import heuristic_extract
+from factcheck.extract import heuristic_extract, select_key_points
+from factcheck.queries import heuristic_queries, news_window
 from factcheck.compute import recompute
 from factcheck.credibility import annotate, dedupe_syndicated, dedupe_urls, drop_circular
 from factcheck.judge import apply_verified_labels
@@ -154,7 +155,11 @@ def _summary(claims: list[ClaimOut]) -> str:
     parts = []
     if facts:
         counts = Counter(claim.verdict for claim in facts)
-        bits = ", ".join(f"{counts[name]} {name}" for name in ("Supported", "Contradicted", "Unsupported", "Unverified", "Conflicting") if counts[name])
+        bits = ", ".join(
+            f"{counts[name]} {name}"
+            for name in ("Supported", "likely_true", "Contradicted", "Unsupported", "Unverified", "Conflicting")
+            if counts[name]
+        )
         parts.append(f"{len(facts)} fact claim{'s' if len(facts) != 1 else ''}: {bits}")
     if opinions:
         counts = Counter(claim.mainstream_check.consensus for claim in opinions)
@@ -184,6 +189,7 @@ class VerificationService:
         drafter=None,
         synopsizer=None,
         reviewer=None,
+        query_writer=None,
     ):
         self.settings = settings
         self.extractor = extractor
@@ -201,6 +207,7 @@ class VerificationService:
         self.drafter = drafter
         self.synopsizer = synopsizer
         self.reviewer = reviewer
+        self.query_writer = query_writer
         self._draft_text = ""
         self._disconnect = None
         self._meter_lock = threading.Lock()
@@ -269,17 +276,18 @@ class VerificationService:
                     extracted = heuristic_extract(check_text, check_claims)
                     warnings = [f"extraction_fallback:{exc.__class__.__name__}"]
                 extracted = [normalize_claim(item) for item in extracted]
+            if check_claims is None and preclassified is None:
+                extracted = select_key_points(extracted, 6)
             self._phases["extract"] = time.monotonic() - t_extract
-            # A 45s, 75s, or 120s request keeps 25s for retrieval and 8s for review
-            # even when extraction overruns. A shorter budget, including a zero
-            # budget, is left alone so the request can stop.
-            if budget >= 33 and deadline - time.monotonic() < 33:
-                deadline = time.monotonic() + 33
+            # Retrieval keeps 25s and the two-pass review keeps 16s on a real request.
+            # A shorter budget, including a zero budget, is left alone so the request can stop.
+            if budget >= 41 and deadline - time.monotonic() < 41:
+                deadline = time.monotonic() + 41
                 self._deadline = deadline
             if len(extracted) > self.settings.max_output_claims:
                 extracted = extracted[: self.settings.max_output_claims]
                 warnings.append("claim_limit")
-            outputs = self._run(extracted, meter, warnings, deadline - 8)
+            outputs = self._run(extracted, meter, warnings, deadline - 16)
             payload = self._assemble(
                 asked or text,
                 claims,
@@ -349,6 +357,19 @@ class VerificationService:
             needs_human_review=False,
             checked_at=datetime.now(timezone.utc).isoformat(),
         )
+
+    def _search_queries(self, text: str) -> list[str]:
+        writer = getattr(self, "query_writer", None)
+        if writer is not None:
+            try:
+                written = writer.write(text)
+            except Exception as exc:  # noqa: BLE001 - a query failure must not skip retrieval
+                logger.warning("query writer failed %s", exc.__class__.__name__)
+                written = []
+            if written:
+                return written[:3]
+        written = heuristic_queries(text)
+        return written or [focus_query(text)]
 
     def _draft(self, question: str) -> tuple[str, str, str]:
         from factcheck.questions import parse_stance
@@ -495,16 +516,36 @@ class VerificationService:
     def _evidence_cluster(self, extracted, indexes, results, effort, meter, warnings) -> None:
         claims = [extracted[index] for index in indexes]
         limit = EFFORT_LIMITS[effort]["search"]
-        from factcheck.cleanup import entity_query, is_current_event
-
-        raw_query = " ".join(claim.text for claim in claims)
-        query = entity_query(raw_query) if is_current_event(raw_query) else focus_query(raw_query)
         scientific = any(claim.scientific or claim.claim_category in {"T2", "T3", "T4"} for claim in claims)
         categories = [claim.claim_category for claim in claims]
         before = getattr(self.retriever, "cost_usd", 0.0)
+        before_calls = getattr(self.retriever, "retrieval_calls", 0)
         t_retrieve = time.monotonic()
-        hits = list(self.retriever.search(query, limit=limit, scientific=scientific, categories=categories))
+        hits = []
+        seen_urls: set[str] = set()
+        for claim in claims:
+            queries = self._search_queries(claim.text)
+            window = news_window(claim.text)
+            found = list(
+                self.retriever.search(
+                    queries[0],
+                    limit=limit,
+                    scientific=scientific,
+                    categories=categories,
+                    extra_queries=queries[1:],
+                    window=window,
+                    broad=True,
+                )
+            )
+            for hit in found:
+                key = (hit.url or "").split("#")[0].rstrip("/")
+                if not key or key in seen_urls:
+                    continue
+                seen_urls.add(key)
+                hits.append(hit)
         self._phases["retrieve"] = self._phases.get("retrieve", 0.0) + (time.monotonic() - t_retrieve)
+        added_calls = getattr(self.retriever, "retrieval_calls", before_calls) - before_calls
+        meter.retrieval_calls += added_calls if added_calls > 0 else len(claims)
         with self._meter_lock:
             meter.add_usd(getattr(self.retriever, "cost_usd", 0.0) - before, retriever=True)
         warnings.extend(getattr(self.retriever, "warnings", [])[-3:])
@@ -640,6 +681,7 @@ class VerificationService:
             confidence=strength,
             reasoning=decision.reasoning,
             attribution=claim.attribution,
+            span=getattr(claim, "span", "") or "",
             needs_human_review=review,
             hypothesis_status=decision.hypothesis_status,
             would_settle=decision.would_settle,
@@ -691,6 +733,7 @@ class VerificationService:
                 output_tokens=meter.output_tokens,
                 estimated_cost_usd=round(meter.estimated_cost_usd, 6),
                 retriever_cost_usd=round(meter.retriever_cost_usd, 6),
+                retrieval_calls=int(getattr(meter, "retrieval_calls", 0)),
                 credits_charged=credits,
                 tier=tier,
                 models=meter.models,

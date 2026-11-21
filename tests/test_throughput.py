@@ -41,7 +41,7 @@ class _SlowRetriever:
         self.cost_usd = 0.0
         self.warnings: list[str] = []
 
-    def search(self, query: str, *, limit: int = 6, scientific: bool = False, categories=None):
+    def search(self, query: str, *, limit: int = 6, scientific: bool = False, categories=None, **_ignored):
         time.sleep(self.delay)
         self.queries.append(query)
         return []

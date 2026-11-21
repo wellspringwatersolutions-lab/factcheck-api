@@ -156,6 +156,7 @@ def parse_disambiguation(payload: dict, originals: dict[int, str] | None = None)
 def parse_decomposition(payload: dict) -> list[ExtractedClaim]:
     claims = []
     for item in payload.get("claims") or []:
+        span = ""
         if isinstance(item, str):
             text = item.strip()
             claim_type = "opinion" if _OPINION.search(text) else "fact"
@@ -166,6 +167,7 @@ def parse_decomposition(payload: dict) -> list[ExtractedClaim]:
             hypothesis = is_hypothesis(text)
         elif isinstance(item, dict):
             text = (item.get("text") or "").strip()
+            span = (item.get("span") or "").strip()
             claim_type = "opinion" if item.get("claim_type") == "opinion" else "fact"
             category = item.get("claim_category") or classify_category(text, claim_type)
             attribution = item.get("attribution")
@@ -184,6 +186,7 @@ def parse_decomposition(payload: dict) -> list[ExtractedClaim]:
             scientific=scientific,
             attribution=attribution,
             hypothesis=hypothesis,
+            span=span,
         )
         claims.append(normalize_claim(claim))
     return claims
@@ -206,12 +209,13 @@ Do not change fact into opinion or the reverse.
 Preserve attribution.
 Return JSON {"sentences": [{"id": 0, "text": "...", "drop": false, "claim_type": "fact|opinion", "attribution": null}]}"""
 
-_DECOMPOSE = """STAGE: decomposition
-Split the text into atomic claims that stand on their own.
-Attributed claims must say who said it, not state the content as an unattributed fact.
-Mark time_sensitive, scientific, hypothesis (prediction, novel conjecture, or business idea), and claim_category T1-T8.
+_DECOMPOSE = """Pick the 4 most important checkable key points in this passage. Never return more than 4.
+Skip the user's question, headings, and meta commentary such as "breaks down into".
+Each point is one checkable claim. span is a verbatim sentence copied from the passage.
+Attributed claims must say who said it.
+Mark time_sensitive, scientific, hypothesis, and claim_category T1-T8.
 T1 math, T2 scientific law, T3 well-supported theory, T4 medical or empirical, T5 historical, T6 expert consensus, T7 eyewitness, T8 opinion.
-Return JSON {"claims": [{"text": "...", "claim_type": "fact", "claim_category": "T5", "time_sensitive": false, "scientific": false, "hypothesis": false, "attribution": null}]}"""
+Return JSON {"points": [{"text": "...", "span": "...", "claim_type": "fact", "claim_category": "T5", "time_sensitive": false, "scientific": false, "hypothesis": false, "attribution": null}]}"""
 
 
 def _claims_from_result(result) -> list[ExtractedClaim]:
@@ -222,6 +226,8 @@ def _claims_from_result(result) -> list[ExtractedClaim]:
 
     raw = result.content or ""
     snippet = raw[:400]
+    if '"points"' in raw and '"claims"' not in raw:
+        raw = raw.replace('"points"', '"claims"', 1)
     if not raw.strip():
         logger.warning("extraction ValueError: empty json snippet=%r", snippet)
         raise ValueError("empty json")
@@ -365,7 +371,7 @@ class LiveExtractor:
         if claims:
             return heuristic_extract(text, claims), []
         prepared = prepare_answer(text) if text else ""
-        chunks = chunk_paragraphs(prepared)
+        chunks = chunk_paragraphs(prepared, size=2400)
         if not chunks:
             return [], []
         deadline = time.monotonic() + _EXTRACT_BUDGET
@@ -408,7 +414,27 @@ class LiveExtractor:
                 continue
             seen.add(key)
             unique.append(claim)
-        return unique, warnings
+        return select_key_points(unique, 6), warnings
+
+
+def select_key_points(claims: list[ExtractedClaim], limit: int = 6) -> list[ExtractedClaim]:
+    """The claims worth a full retrieval pass. Questions and fragments are already dropped."""
+    from factcheck.cleanup import priority
+
+    ranked = sorted(claims, key=lambda claim: priority(claim))
+    chosen: list[ExtractedClaim] = []
+    seen: set[str] = set()
+    for claim in ranked:
+        key = " ".join(claim.text.lower().split())
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        if not claim.span:
+            claim.span = claim.text
+        chosen.append(claim)
+        if len(chosen) >= limit:
+            break
+    return chosen
 
 
 class HeuristicExtractor:

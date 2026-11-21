@@ -73,7 +73,7 @@ def _article(claim) -> str:
                 f"{html.escape(item.rating)}{when}</p>"
             )
     else:
-        label = claim.verdict or "No verdict"
+        label = "Likely true" if claim.verdict == "likely_true" else (claim.verdict or "No verdict")
         bits.append(f"<p><strong>{html.escape(label)}</strong> · strength of support {claim.strength_of_support:.2f}</p>")
         if claim.hypothesis_status:
             bits.append(f"<p>Hypothesis status: {html.escape(claim.hypothesis_status.replace('_', ' '))}</p>")

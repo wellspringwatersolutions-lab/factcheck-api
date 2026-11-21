@@ -105,6 +105,7 @@ def reconcile_answer(result: VerificationOut) -> None:
     contradicted = [claim for claim in facts if claim.verdict == "Contradicted"]
     conflicting = [claim for claim in facts if claim.verdict == "Conflicting"]
     supported = [claim for claim in facts if claim.verdict == "Supported"]
+    likely = [claim for claim in facts if claim.verdict == "likely_true"]
     record = " ".join((source.quote or source.snippet or "") for claim in facts for source in claim.sources)
     criminal = bool(_YESNO.match(question.strip())) and bool(re.search(r"\bcriminal\b", question, re.I))
     guilt_in_record = bool(_GUILT.search(record))
@@ -120,7 +121,7 @@ def reconcile_answer(result: VerificationOut) -> None:
             answer = "yes"
         else:
             answer = "partly"
-    elif stance in {"yes", "no", "partly"} and (supported or (criminal and stance == "no" and not guilt_in_record)):
+    elif stance in {"yes", "no", "partly"} and (supported or likely or (criminal and stance == "no" and not guilt_in_record)):
         answer = stance
     else:
         answer = "not_enough_evidence"

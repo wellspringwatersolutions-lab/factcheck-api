@@ -14,8 +14,9 @@ The product name lives in `src/factcheck/branding.py` as `SERVICE_NAME`.
 
 - `mode`: `"text"` or `"question"`
 - `draft_answer`: `{"model", "text", "stance", "correction"}` when `mode` is `"question"`, otherwise `null`. `stance` is `yes`, `no`, `partly`, or `not_enough_evidence`. The draft is not evidence. When the evidence contradicts it, `correction` is also prefixed to `text`.
-- `synopsis`: `{"rating", "answer", "tldr", "summary", "caveats", "unchecked_count", "counts"}`. `answer` uses the same four values as `stance`. In question mode the draft, `answer`, `tldr`, and `rating` agree. `rating` is Accurate, Mostly accurate, Mixed, Mostly inaccurate, Inaccurate, or Not enough evidence. `counts` is `{"supported", "contradicted", "conflicting", "unverified", "hypothesis", "opinion", "not_checked"}`.
-- `review`: `{"passes", "changes": [{"claim", "from", "to", "reason"}], "signed_off_by"}`. Qwen proposes corrections and DeepSeek signs off. A correction can cite only a quote or tool trace already in the result. If time is short the review is skipped and `warnings` includes `review skipped`.
+- `synopsis`: `{"rating", "answer", "tldr", "summary", "caveats", "unchecked_count", "counts"}`. `answer` uses the same four values as `stance`. In question mode the draft, `answer`, `tldr`, and `rating` agree. `rating` is Accurate, Mostly accurate, Mixed, Mostly inaccurate, Inaccurate, or Not enough evidence. `counts` includes `supported`, `likely_true`, `contradicted`, `conflicting`, `unverified`, `hypothesis`, `opinion`, and `not_checked`. `likely_true` counts as evidence toward the rating.
+- `review`: `{"passes", "changes": [{"claim", "from", "to", "reason"}], "signed_off_by"}`. Qwen proposes corrections and DeepSeek signs off. A correction can cite only a quote or tool trace already in the result. If a pass returns bad JSON, that pass is still listed. The review is left empty only when it is skipped before it starts, and `warnings` then includes `review skipped`.
+- `usage` on both `/check` and `/v1/verify`: tokens, estimated USD, retriever USD, and `retrieval_calls`. The async job report includes `review` and `usage` too.
 - A failed draft is HTTP 503 `{"error": {"code": "draft_failed", ...}}`. That request is not charged.
 
 `POST /v1/verify` also returns:
@@ -32,9 +33,10 @@ Verdicts:
 
 | Verdict | When |
 | --- | --- |
-| Supported | A tool result, a structured fact of record such as a Wikidata office or date, or two independent sources from the upper part of the evidence scale. One encyclopedia page is not enough. |
+| Supported | A tool result, a structured fact of record such as a Wikidata office or date, or two independent sources from the upper part of the evidence scale quote the claim. |
+| likely_true | Site label "Likely true". One reputable source (major news, government, or an encyclopedia) backs the substance, or the quote is not exact enough for Supported. It counts toward the bottom line. |
 | Contradicted | The best quoted evidence goes against the claim as written. The site may display this as Conflicting. The API value stays `Contradicted`. |
-| Unverified | No usable passage, or only weak support: an anecdote, one source, or a source below the historical and official record. This means the claim could not be confirmed. It does not mean the claim is false. |
+| Unverified | No usable passage, or only a weak source. This means the claim could not be confirmed. It does not mean the claim is false. |
 | Conflicting | Credible sources disagree. Both quotes are shown. |
 | Hypothesis | A prediction, novel conjecture, or business idea. Status is `supporting_evidence`, `contradicting_evidence`, or `untested`. Never true or false. |
 
@@ -71,7 +73,15 @@ python -m factcheck.cli serve --port 8741
 
 With no API keys the service still runs. Math is recomputed locally. Fact claims come back Unverified until a retriever can fetch a page. SQLite (`./data/factcheck.db`) and an in-memory cache are the defaults, so Postgres and Redis are optional.
 
-A normal check aims to finish within about 45 seconds, including the two-pass review. A pasted answer longer than 3,500 characters is allowed 75 seconds. The clock starts after the request body is parsed. Extraction is capped at 12 seconds. Retrieval keeps at least 25 seconds and the review keeps 8 seconds.
+A pasted answer is condensed to the 4–6 most important checkable key points. The user's question, when one is pasted above the answer, is context and is not a claim. Each key point gets 2–3 keyword search queries (Qwen, then DeepSeek if that call fails). Those queries run on Desearch web and Desearch news. A month or year in the claim sets the news window; otherwise news is not date-limited. The window is never the past week by default.
+
+A normal check aims to finish within about 45 seconds, including the two-pass review. A pasted answer longer than 3,500 characters is allowed 75 seconds. An async job gets 120 seconds, split so each key point is retrieved and judged and the review still runs. The clock starts after the request body is parsed. Extraction is capped at 12 seconds. Retrieval keeps at least 25 seconds and the review keeps 16 seconds.
+
+`scripts/regress.py` prints per-claim verdicts and the bottom line from a live API. It is not part of the test run.
+
+```bash
+python scripts/regress.py --base "$FACTCHECK_BASE_URL" washington adams --file gemini-paste.txt
+```
 
 Long pastes can also be checked in the background:
 

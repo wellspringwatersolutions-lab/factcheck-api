@@ -14,15 +14,15 @@ from factcheck.synopsis import (
     grounded,
 )
 
-_CAUTION = {"Supported": 0, "Contradicted": 1, "Hypothesis": 2, "Conflicting": 3, "Unverified": 4}
-_VERDICTS = {"Supported", "Contradicted", "Unverified", "Conflicting", "Hypothesis"}
+_CAUTION = {"Supported": 0, "likely_true": 1, "Contradicted": 2, "Hypothesis": 3, "Conflicting": 4, "Unverified": 5}
+_VERDICTS = {"Supported", "likely_true", "Contradicted", "Unverified", "Conflicting", "Hypothesis"}
 _INSTRUCTION = """You review a finished fact-check. You do not add facts.
 Flag a verdict that its own quote does not back.
 You may propose a different verdict only by copying a verbatim quote or tool trace that is already in the evidence.
 You may not use your own knowledge. If no such quote exists, leave the verdict Unverified.
 Flag a tldr or summary that overstates or contradicts the claim verdicts, and propose a plainer wording using only those verdicts and quotes.
 In question mode the draft's yes or no, synopsis.answer, the tldr, and the rating must all agree.
-Return JSON {"corrections": [{"claim": "claim text", "to": "Supported|Contradicted|Unverified|Conflicting|Hypothesis", "quote": "verbatim quote or empty", "reason": "short"}], "tldr": "", "summary": ""}"""
+Return JSON {"corrections": [{"claim": "claim text", "to": "Supported|likely_true|Contradicted|Unverified|Conflicting|Hypothesis", "quote": "verbatim quote or empty", "reason": "short"}], "tldr": "", "summary": ""}"""
 
 
 def _caution(verdict: str | None) -> int:
@@ -105,6 +105,11 @@ def apply_corrections(result: VerificationOut, proposed: dict) -> list[ReviewCha
             _attach_quote(claim, quote, target)
             claim.strength_of_support = max(claim.strength_of_support, 0.55)
             claim.confidence = claim.strength_of_support
+        elif target == "likely_true":
+            if not any(source.grade in {"A", "B"} for source in claim.sources):
+                continue
+            claim.strength_of_support = max(claim.strength_of_support, 0.55)
+            claim.confidence = claim.strength_of_support
         elif target == "Conflicting":
             quotes = [source.quote for source in claim.sources if source.quote]
             if len(quotes) < 2 and not _cite(claim, quote):
@@ -179,26 +184,32 @@ def run_review(result: VerificationOut, *, reviewer: TwoPassReview, deadline: fl
         result.review = ReviewOut()
         return
     original_verdicts = {claim.text: claim.verdict for claim in result.claims}
-    original_synopsis = result.synopsis.model_copy(deep=True) if result.synopsis is not None else None
-    try:
-        timeout = 6.0 if remaining is None else max(1.0, min(6.0, remaining - 1.0))
-        first = _ask(reviewer, reviewer.pass1_model, result, timeout)
-        first_changes = apply_corrections(result, first)
-        after_first = {claim.text: claim.verdict for claim in result.claims}
-        remaining = None if deadline is None else deadline - time.monotonic()
-        if remaining is not None and remaining < 3:
-            raise TimeoutError("review skipped")
+    attempted: list[str] = []
+    first_changes: list[ReviewChange] = []
+    second_changes: list[ReviewChange] = []
+
+    def _one(model: str, budget: float) -> dict:
+        try:
+            payload = _ask(reviewer, model, result, budget)
+        except (LLMError, TimeoutError, ValueError, TypeError, KeyError) as exc:
+            logger_warning = f"review pass failed:{exc.__class__.__name__}"
+            result.warnings = list(dict.fromkeys([*result.warnings, logger_warning]))
+            attempted.append(model)
+            return {}
+        attempted.append(model)
+        return payload if isinstance(payload, dict) else {}
+
+    timeout = 6.0 if remaining is None else max(1.0, min(6.0, remaining - 1.0))
+    first = _one(reviewer.pass1_model, timeout)
+    first_changes = apply_corrections(result, first)
+    after_first = {claim.text: claim.verdict for claim in result.claims}
+    remaining = None if deadline is None else deadline - time.monotonic()
+    if remaining is None or remaining >= 3:
         timeout = 6.0 if remaining is None else max(1.0, min(6.0, remaining - 0.5))
-        second = _ask(reviewer, reviewer.pass2_model, result, timeout)
+        second = _one(reviewer.pass2_model, timeout)
         second_changes = apply_corrections(result, second)
-    except (LLMError, TimeoutError, Exception):  # noqa: BLE001 - a late review must not fail the check
-        for claim in result.claims:
-            claim.verdict = original_verdicts.get(claim.text, claim.verdict)
-        result.synopsis = original_synopsis
-        result.warnings = list(dict.fromkeys([*result.warnings, "review skipped"]))
-        result.review = ReviewOut()
-        _sync_usage(result, meter)
-        return
+    else:
+        result.warnings = list(dict.fromkeys([*result.warnings, "review pass 2 skipped"]))
     disagreed = False
     for claim in result.claims:
         if claim.claim_type == "opinion" or claim.verdict == "Hypothesis":
@@ -222,7 +233,8 @@ def run_review(result: VerificationOut, *, reviewer: TwoPassReview, deadline: fl
         for claim in result.claims
         if original_verdicts.get(claim.text) != claim.verdict
     ]
-    result.review = ReviewOut(passes=[reviewer.pass1_model, reviewer.pass2_model], changes=changes, signed_off_by=reviewer.pass2_model)
+    signed = reviewer.pass2_model if reviewer.pass2_model in attempted else (attempted[-1] if attempted else "")
+    result.review = ReviewOut(passes=attempted, changes=changes, signed_off_by=signed)
     from factcheck.reconcile import reconcile_answer
 
     reconcile_answer(result)
@@ -235,4 +247,6 @@ def _sync_usage(result: VerificationOut, meter) -> None:
     result.usage.input_tokens = meter.input_tokens
     result.usage.output_tokens = meter.output_tokens
     result.usage.estimated_cost_usd = round(meter.estimated_cost_usd, 6)
+    result.usage.retriever_cost_usd = round(getattr(meter, "retriever_cost_usd", 0.0), 6)
+    result.usage.retrieval_calls = int(getattr(meter, "retrieval_calls", 0))
     result.usage.models = dict(meter.models)
