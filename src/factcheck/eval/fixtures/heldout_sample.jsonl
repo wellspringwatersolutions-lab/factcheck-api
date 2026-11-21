@@ -1,0 +1,10 @@
+{"id": "math-408-17 * 24", "dataset": "heldout", "tool": "calculator", "claim": "17 * 24 = 408", "label": "SUPPORTED", "documents": []}
+{"id": "math-400-17 * 24", "dataset": "heldout", "tool": "calculator", "claim": "17 * 24 = 400", "label": "CONTRADICT", "documents": []}
+{"id": "math-4-2 + 2", "dataset": "heldout", "tool": "calculator", "claim": "2 + 2 = 4", "label": "SUPPORTED", "documents": []}
+{"id": "math-80-9 * 9", "dataset": "heldout", "tool": "calculator", "claim": "9 * 9 = 80", "label": "CONTRADICT", "documents": []}
+{"id": "math-25-100 / 4", "dataset": "heldout", "tool": "calculator", "claim": "100 / 4 = 25", "label": "SUPPORTED", "documents": []}
+{"id": "math-12-15 - 3", "dataset": "heldout", "tool": "calculator", "claim": "15 - 3 = 12", "label": "SUPPORTED", "documents": []}
+{"id": "h1", "dataset": "heldout", "claim": "Paris is the capital of France.", "label": "SUPPORTED", "documents": [{"id": "h1a", "title": "French government", "text": "Paris is the capital of France according to the French government website."}, {"id": "h1b", "title": "Gazetteer", "text": "Official records list Paris as the seat of government, the capital of France."}]}
+{"id": "h2", "dataset": "heldout", "claim": "The Moon is a star.", "label": "CONTRADICT", "documents": [{"id": "h2a", "title": "Astronomy", "text": "The Moon is not a star. It is a satellite of Earth."}, {"id": "h2b", "title": "Night sky", "text": "Observers note that the Moon is not a star and orbits Earth."}]}
+{"id": "h3", "dataset": "heldout", "claim": "Tokyo is the capital of Japan.", "label": "SUPPORTED", "documents": [{"id": "h3a", "title": "Japan ministry", "text": "Tokyo is the capital of Japan."}, {"id": "h3b", "title": "Atlas", "text": "An atlas lists Tokyo as the capital of Japan and a coastal city."}]}
+{"id": "h4", "dataset": "heldout", "claim": "Newton disliked apples.", "label": "NOT ENOUGH INFO", "documents": [{"id": "h4d", "title": "h4", "text": "Isaac Newton formulated laws of motion and universal gravitation."}, {"id": "h4b", "title": "h4 copy", "text": "Isaac Newton formulated laws of motion and universal gravitation."}]}

@@ -1,0 +1,46 @@
+# Render blueprint: one Starter web service (~$7/mo) with a 1 GB disk for SQLite.
+# Postgres and Redis are not required. The cache stays in memory.
+# Create the service from this file, then fill the sync:false secrets in the dashboard.
+services:
+  - type: web
+    name: factcheck
+    runtime: docker
+    plan: starter
+    healthCheckPath: /health
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    disk:
+      name: factcheck-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: DATABASE_URL
+        value: sqlite:////var/data/factcheck.db
+      - key: CACHE_BACKEND
+        value: memory
+      - key: LLM_MODE
+        value: auto
+      - key: FREE_DAILY_CAP_USD
+        value: "20"
+      - key: CHUTES_API_KEY
+        sync: false
+      - key: DESEARCH_API_KEY
+        sync: false
+      - key: OPENALEX_EMAIL
+        sync: false
+      - key: OPENALEX_API_KEY
+        sync: false
+      - key: SEMANTIC_SCHOLAR_API_KEY
+        sync: false
+      - key: NCBI_API_KEY
+        sync: false
+      - key: NCBI_EMAIL
+        sync: false
+      - key: GOOGLE_FACTCHECK_API_KEY
+        sync: false
+      - key: OPENAI_COMPAT_BASE_URL
+        sync: false
+      - key: OPENAI_COMPAT_API_KEY
+        sync: false
+      - key: PUBLIC_BASE_URL
+        sync: false
