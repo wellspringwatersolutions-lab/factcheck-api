@@ -52,7 +52,7 @@ class OpenAICompatClient:
         self.timeout = timeout
         self._client = client or httpx.Client(timeout=timeout)
 
-    def complete(self, *, model: str, messages: list[dict], temperature: float = 0.0, max_tokens: int = 800) -> LLMResult:
+    def complete(self, *, model: str, messages: list[dict], temperature: float = 0.0, max_tokens: int = 800, timeout: float | None = None) -> LLMResult:
         use_model = self.fixed_model or model
         payload = {
             "model": use_model,
@@ -67,15 +67,15 @@ class OpenAICompatClient:
         }
         headers = {"Authorization": f"Bearer {self.api_key}"}
         url = f"{self.base_url}/chat/completions"
-        response = self._post(url, payload, headers)
+        response = self._post(url, payload, headers, timeout=timeout)
         if response.status_code == 400:
             for key in ("chat_template_kwargs", "enable_thinking", "reasoning_effort", "response_format"):
                 payload.pop(key, None)
-            response = self._post(url, payload, headers)
+            response = self._post(url, payload, headers, timeout=timeout)
         response.raise_for_status()
         content, usage, served = self._read(response)
         if not content.strip():
-            retry = self._post(url, payload, headers)
+            retry = self._post(url, payload, headers, timeout=timeout)
             retry.raise_for_status()
             content, usage, served = self._read(retry)
         if not content.strip():
@@ -89,8 +89,8 @@ class OpenAICompatClient:
             family=family_of(served or use_model),
         )
 
-    def _post(self, url: str, payload: dict, headers: dict) -> httpx.Response:
-        return self._client.post(url, json=payload, headers=headers)
+    def _post(self, url: str, payload: dict, headers: dict, timeout: float | None = None) -> httpx.Response:
+        return self._client.post(url, json=payload, headers=headers, timeout=timeout or self.timeout)
 
     @staticmethod
     def _read(response: httpx.Response) -> tuple[str, dict, str]:
@@ -104,11 +104,11 @@ class FailoverClient:
     def __init__(self, providers: list):
         self.providers = providers
 
-    def complete(self, *, model: str, messages: list[dict], temperature: float = 0.0) -> LLMResult:
+    def complete(self, *, model: str, messages: list[dict], temperature: float = 0.0, max_tokens: int = 800, timeout: float | None = None) -> LLMResult:
         errors: list[str] = []
         for provider in self.providers:
             try:
-                return provider.complete(model=model, messages=messages, temperature=temperature)
+                return provider.complete(model=model, messages=messages, temperature=temperature, max_tokens=max_tokens, timeout=timeout)
             except Exception as exc:  # noqa: BLE001 - failover is the point
                 errors.append(f"{provider.name}: {exc}")
         raise LLMError("; ".join(errors) or "no language-model provider is configured")
@@ -119,7 +119,7 @@ class ScriptedLLM:
         self.responses = list(responses)
         self.calls: list[dict] = []
 
-    def complete(self, *, model: str, messages: list[dict], temperature: float = 0.0) -> LLMResult:
+    def complete(self, *, model: str, messages: list[dict], temperature: float = 0.0, max_tokens: int = 800, timeout: float | None = None) -> LLMResult:
         self.calls.append({"model": model, "messages": messages})
         content = self.responses.pop(0) if self.responses else "{}"
         return LLMResult(content, 20, 20, model, "script", family_of(model))

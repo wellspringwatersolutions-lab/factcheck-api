@@ -14,15 +14,17 @@ from uuid import uuid4
 from factcheck.aggregate import RULES_VERSION, decide
 from factcheck.categories import CATEGORIES, EFFORT_LIMITS, effort_for, normalize_claim
 from factcheck.checks import UrlChecker, apply_passage_checks, passage_check_rows
-from factcheck.cleanup import focus_query, priority
+from factcheck.cleanup import focus_query, is_bare_question, priority, split_dialogue
 from factcheck.compute import recompute
 from factcheck.credibility import annotate, dedupe_syndicated, dedupe_urls
 from factcheck.judge import apply_verified_labels
 from factcheck.retrievers import lookup_capital
+from factcheck.questions import DraftError
 from factcheck.schemas import (
     DISCLAIMER,
     CheckRow,
     ClaimOut,
+    DraftAnswer,
     JudgeOut,
     JudgesOut,
     MainstreamCheck,
@@ -31,6 +33,7 @@ from factcheck.schemas import (
     UsageOut,
     VerificationOut,
 )
+from factcheck.synopsis import build_synopsis
 from factcheck.textutil import is_fragile, jaccard, normalize_text, overlap
 from factcheck.types import Evidence, ExtractedClaim, UsageMeter
 
@@ -148,6 +151,8 @@ class VerificationService:
         url_checker=None,
         capital_fetcher=None,
         claimbuster=None,
+        drafter=None,
+        synopsizer=None,
     ):
         self.settings = settings
         self.extractor = extractor
@@ -162,6 +167,8 @@ class VerificationService:
         self.url_checker = url_checker or UrlChecker(timeout=min(8.0, getattr(settings, "retrieval_timeout_seconds", 8.0)))
         self.capital_fetcher = capital_fetcher
         self.claimbuster = claimbuster
+        self.drafter = drafter
+        self.synopsizer = synopsizer
         self._disconnect = None
         self._meter_lock = __import__("threading").Lock()
 
@@ -176,7 +183,7 @@ class VerificationService:
             "soma_dev_only": soma,
         }
 
-    def verify(self, *, text, claims, client, preclassified=None, charge=True, disconnect_check=None):
+    def verify(self, *, text, claims, client, preclassified=None, charge=True, disconnect_check=None, question=None):
         reservation = self.billing.authorize(client) if charge else None
         self._disconnect = disconnect_check
         meter = UsageMeter()
@@ -185,18 +192,46 @@ class VerificationService:
         for ranker in (self.ranker_a, self.ranker_b, self.ranker_tie):
             if ranker is not None and hasattr(ranker, "meter"):
                 ranker.meter = meter
+        for helper in (self.drafter, self.synopsizer):
+            if helper is not None and hasattr(helper, "meter"):
+                helper.meter = meter
+        deadline = time.monotonic() + float(getattr(self.settings, "request_budget_seconds", 40))
         try:
             warnings: list[str] = []
+            mode = "text"
+            asked = None
+            draft_answer = None
+            check_text = text
+            check_claims = claims
+            if preclassified is None and not claims and (question or is_bare_question(text)):
+                mode = "question"
+                asked = (question or text or "").strip()
+                model_name, drafted = self._draft(asked)
+                draft_answer = DraftAnswer(model=model_name, text=drafted)
+                check_text = drafted
+                check_claims = None
             if preclassified is not None:
                 extracted = [normalize_claim(item) for item in preclassified]
             else:
-                extracted, warnings = self.extractor.extract(text, claims)
+                extracted, warnings = self.extractor.extract(check_text, check_claims)
                 extracted = [normalize_claim(item) for item in extracted]
             if len(extracted) > self.settings.max_output_claims:
                 extracted = extracted[: self.settings.max_output_claims]
                 warnings.append("claim_limit")
-            outputs = self._run(extracted, meter, warnings)
-            payload = self._assemble(text, claims, outputs, meter, warnings, client, charge)
+            outputs = self._run(extracted, meter, warnings, deadline)
+            payload = self._assemble(
+                asked or text,
+                claims,
+                outputs,
+                meter,
+                warnings,
+                client,
+                charge,
+                mode=mode,
+                draft_answer=draft_answer,
+                question=asked,
+                deadline=deadline,
+            )
             if payload.usage.tier == "owner":
                 logger.info("verification %s tier=owner ip=%s", payload.verification_id, getattr(client, "ip", ""))
             self.store.save(payload, fingerprint=getattr(client, "fingerprint", None), tier=payload.usage.tier, api_key_id=getattr(reservation, "api_key_id", None))
@@ -232,12 +267,30 @@ class VerificationService:
             needs_human_review=False,
         )
 
-    def _run(self, extracted: list[ExtractedClaim], meter: UsageMeter, warnings: list[str]) -> list[ClaimOut]:
+    def _draft(self, question: str) -> tuple[str, str]:
+        if self.drafter is None:
+            raise DraftError("No language model is configured, so a question cannot be drafted.")
+        try:
+            drafted = self.drafter(question)
+        except DraftError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - the caller gets one clean error, not a stack trace
+            raise DraftError("The draft answer could not be written, so nothing was checked.") from exc
+        if not isinstance(drafted, tuple) or len(drafted) != 2:
+            raise DraftError("The draft answer could not be written, so nothing was checked.")
+        model_name, text = drafted
+        text = (text or "").strip()
+        if not text:
+            raise DraftError("The draft answer was empty, so nothing was checked.")
+        return str(model_name or "unknown"), text
+
+    def _run(self, extracted: list[ExtractedClaim], meter: UsageMeter, warnings: list[str], deadline: float | None = None) -> list[ClaimOut]:
         self._cost_mark = getattr(self.retriever, "cost_usd", 0.0)
         results: list[ClaimOut | None] = [None] * len(extracted)
         if self._disconnected():
             return [self._not_checked(claim, "Not checked: the client disconnected before the check finished.") for claim in extracted]
-        deadline = time.monotonic() + float(getattr(self.settings, "request_budget_seconds", 40))
+        if deadline is None:
+            deadline = time.monotonic() + float(getattr(self.settings, "request_budget_seconds", 40))
         worthiness: dict[str, float] = {}
         if getattr(self, "claimbuster", None):
             try:
@@ -477,7 +530,7 @@ class VerificationService:
             sources=[_source_out(item) for item in sources],
         )
 
-    def _assemble(self, text, claims, outputs, meter, warnings, client, charge) -> VerificationOut:
+    def _assemble(self, text, claims, outputs, meter, warnings, client, charge, mode="text", draft_answer=None, question=None, deadline=None) -> VerificationOut:
         tier = "eval"
         credits = 0.0
         if charge:
@@ -495,11 +548,21 @@ class VerificationService:
         else:
             count = len(claims or [])
             summary_in = f"{count} claim{'s' if count != 1 else ''} submitted."
+        dialogue = split_dialogue(text) if text and mode != "question" else None
+        synopsis = build_synopsis(
+            outputs,
+            question=question or (dialogue.question if dialogue else None),
+            phrasing=self.synopsizer,
+            deadline=deadline,
+        )
         return VerificationOut(
             verification_id=str(uuid4()),
             created_at=datetime.now(timezone.utc).isoformat(),
             input_summary=summary_in,
             claims=outputs,
+            mode=mode,
+            draft_answer=draft_answer,
+            synopsis=synopsis,
             summary=_summary(outputs),
             attribution=DISCLAIMER,
             disclaimer=DISCLAIMER,

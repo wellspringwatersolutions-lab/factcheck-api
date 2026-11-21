@@ -16,7 +16,9 @@ from factcheck.retrievers import (
     GoogleFactCheckRetriever,
     restcountries_fetcher,
 )
+from factcheck.questions import AnswerDrafter
 from factcheck.references import ClaimBuster, ReferenceBundle
+from factcheck.synopsis import LLMSynopsis
 from factcheck.scholarly import ScholarlyBundle
 from factcheck.storage import Store, build_cache, init_db, make_engine, make_session_factory
 from factcheck.types import UsageMeter
@@ -53,6 +55,8 @@ def build_service(settings: Settings):
 
     meter = UsageMeter()
     client = None if settings.llm_mode == "mock" else build_llm(settings)
+    drafter = None
+    synopsizer = None
     if settings.llm_mode == "auto" and client is None:
         pass
     if client is None:
@@ -65,6 +69,8 @@ def build_service(settings: Settings):
         ranker_a = LiveRanker(client, "a", settings.judge_a_model, meter, settings)
         ranker_b = LiveRanker(client, "b", settings.judge_b_model, meter, settings)
         ranker_tie = LiveRanker(client, "tie", settings.tiebreak_model, meter, settings)
+        drafter = AnswerDrafter(client, settings.extract_model, meter, settings)
+        synopsizer = LLMSynopsis(client, settings.extract_model, meter, settings)
 
     providers = []
     desearch = None
@@ -116,4 +122,6 @@ def build_service(settings: Settings):
         url_checker=UrlChecker(timeout=min(12.0, settings.request_timeout_seconds)),
         capital_fetcher=restcountries_fetcher(),
         claimbuster=claimbuster,
+        drafter=drafter,
+        synopsizer=synopsizer,
     )

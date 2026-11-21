@@ -112,4 +112,28 @@ def to_check_report(result: VerificationOut, input_text: str) -> dict:
             row["start"] = start
             row["end"] = start + len(claim.text)
         claims.append(row)
-    return {"input_text": input_text, "claims": claims}
+    synopsis = result.synopsis
+    if synopsis is None:
+        synopsis_out = {
+            "rating": "Not enough evidence",
+            "summary": "Not enough evidence. No synopsis was stored for this check.",
+            "caveats": [],
+            "unchecked_count": 0,
+        }
+    else:
+        synopsis_out = {
+            "rating": synopsis.rating,
+            "summary": synopsis.summary,
+            "caveats": list(synopsis.caveats),
+            "unchecked_count": synopsis.unchecked_count,
+        }
+    draft = None
+    if result.draft_answer is not None:
+        draft = {"model": result.draft_answer.model, "text": result.draft_answer.text}
+    return {
+        "input_text": input_text,
+        "claims": claims,
+        "mode": result.mode,
+        "draft_answer": draft,
+        "synopsis": synopsis_out,
+    }

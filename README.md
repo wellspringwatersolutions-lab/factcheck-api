@@ -10,7 +10,14 @@ The product name lives in `src/factcheck/branding.py` as `SERVICE_NAME`.
 
 ## What you get back
 
-`POST /v1/verify` with `{"text": "..."}` or `{"claims": ["..."]}` returns:
+`POST /v1/verify` and `POST /check` accept `{"text": "..."}`, `{"claims": ["..."]}`, or `{"question": "..."}`. A short text that is only a question is treated the same as `question`. Both responses add these fields and keep the existing ones:
+
+- `mode`: `"text"` or `"question"`
+- `draft_answer`: `{"model", "text"}` when `mode` is `"question"`, otherwise `null`. The draft is not evidence and has no weight in a verdict.
+- `synopsis`: `{"rating", "summary", "caveats", "unchecked_count"}`. `rating` is one of Accurate, Mostly accurate, Mixed, Mostly inaccurate, Inaccurate, Not enough evidence. It is computed from the claim verdicts and cited quotes. A model may only phrase the summary, and that phrasing is dropped if it adds a fact, the claim was contradicted, or the time budget is gone. When a cited passage contradicts the draft, `summary` states that quote as the corrected position.
+- A failed draft is HTTP 503 `{"error": {"code": "draft_failed", ...}}`. That request is not charged.
+
+`POST /v1/verify` also returns:
 
 - `verification_id`, `created_at`, an input summary
 - `claims[]` with `claim_type`, `claim_category` (T1–T8), `verdict`, `strength_of_support` (also copied to `confidence`), `reasoning`, sources, and deterministic checks

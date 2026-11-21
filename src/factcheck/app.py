@@ -13,6 +13,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from mcp.server.transport_security import TransportSecuritySettings
 
 from factcheck.billing import BillingError, ClientIdentity, owner_ips, owner_key_matches, resolve_client_ip
+from factcheck.questions import DraftError
 from factcheck.config import Settings, get_settings
 from factcheck.discovery import llms_txt, manifest
 from factcheck.mcp_server import build_mcp, current_identity, reset_identity, set_identity
@@ -126,10 +127,13 @@ def create_app(settings: Settings | None = None, service=None) -> FastAPI:
         return JSONResponse(status_code=501, content={"error": {"code": "payment_not_configured", **intent.__dict__}})
 
     def _run_verify(body: VerifyIn, disconnect_check=None):
-        if not body.text and not body.claims:
-            raise HTTPException(status_code=422, detail="Provide text or claims.")
+        question = (body.question or "").strip() or None
+        if not body.text and not body.claims and not question:
+            raise HTTPException(status_code=422, detail="Provide text, claims, or a question.")
         if body.text and len(body.text) > settings.max_text_chars:
             raise HTTPException(status_code=422, detail="Text is too long.")
+        if question and len(question) > settings.max_text_chars:
+            raise HTTPException(status_code=422, detail="Question is too long.")
         if body.claims and len(body.claims) > settings.max_input_claims:
             raise HTTPException(status_code=422, detail="Too many claims.")
         identity = current_identity()
@@ -139,9 +143,12 @@ def create_app(settings: Settings | None = None, service=None) -> FastAPI:
                 claims=body.claims,
                 client=identity,
                 disconnect_check=disconnect_check,
+                question=question,
             )
         except BillingError as exc:
             return JSONResponse(status_code=exc.status, content=exc.body())
+        except DraftError as exc:
+            return JSONResponse(status_code=503, content=exc.body())
         except Exception:
             return JSONResponse(
                 status_code=500,
@@ -176,7 +183,7 @@ def create_app(settings: Settings | None = None, service=None) -> FastAPI:
         result = await _execute(body, request)
         if isinstance(result, JSONResponse):
             return result
-        source_text = body.text or "\n".join(body.claims or [])
+        source_text = (body.question or "").strip() or body.text or "\n".join(body.claims or [])
         return to_check_report(result, source_text)
 
     @app.get("/v1/verification/{verification_id}")

@@ -99,6 +99,29 @@ class ClaimOut(BaseModel):
     mainstream_check: MainstreamCheck | None = None
 
 
+class DraftAnswer(BaseModel):
+    """A model draft. It is not evidence and has no weight in a verdict."""
+
+    model: str
+    text: str
+
+
+class SynopsisOut(BaseModel):
+    """Plain-language bottom line. The rating is fixed from the claim verdicts, not from a model."""
+
+    rating: Literal[
+        "Accurate",
+        "Mostly accurate",
+        "Mixed",
+        "Mostly inaccurate",
+        "Inaccurate",
+        "Not enough evidence",
+    ]
+    summary: str
+    caveats: list[str] = Field(default_factory=list)
+    unchecked_count: int = 0
+
+
 class UsageOut(BaseModel):
     input_tokens: int = 0
     output_tokens: int = 0
@@ -114,6 +137,9 @@ class VerificationOut(BaseModel):
     created_at: str
     input_summary: str
     claims: list[ClaimOut]
+    mode: Literal["question", "text"] = "text"
+    draft_answer: DraftAnswer | None = None
+    synopsis: SynopsisOut | None = None
     summary: str
     attribution: str
     disclaimer: str
@@ -126,6 +152,7 @@ class VerifyIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
     text: str | None = None
     claims: list[str] | None = None
+    question: str | None = None
 
 
 DISCLAIMER = (

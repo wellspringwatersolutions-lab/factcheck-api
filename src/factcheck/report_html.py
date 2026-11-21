@@ -30,6 +30,8 @@ _PAGE = """<!DOCTYPE html>
   .kicker {{ font: 12px/1.3 ui-sans-serif, system-ui, sans-serif; letter-spacing: 0.04em; text-transform: uppercase; color: #3d3a34; }}
   blockquote {{ margin: 8px 0; padding-left: 10px; border-left: 3px solid #8d877c; color: #2a261f; }}
   .tag {{ font: 12px/1.3 ui-sans-serif, system-ui, sans-serif; background: white; border: 1px solid #d9d3c7; padding: 1px 6px; margin-right: 4px; }}
+  .synopsis, .draft {{ margin-top: 22px; padding: 16px; background: white; border: 1px solid #e4dfd4; }}
+  .draft {{ background: #f3f1ec; }}
   footer {{ margin-top: 28px; font-size: 0.92rem; color: #4d473e; }}
   a {{ color: #1d4e89; }}
 </style>
@@ -99,8 +101,42 @@ def _article(claim) -> str:
     return f'<article class="{kind}">{"".join(bits)}</article>'
 
 
+def _draft(verification: VerificationOut) -> str:
+    draft = verification.draft_answer
+    if draft is None:
+        return ""
+    return (
+        '<section class="draft">'
+        '<p class="kicker">Drafted answer. This text is not evidence.</p>'
+        f"<p>{html.escape(draft.text)}</p>"
+        "</section>"
+    )
+
+
+def _synopsis(verification: VerificationOut) -> str:
+    synopsis = verification.synopsis
+    if synopsis is None:
+        return ""
+    bits = [
+        '<section class="synopsis">',
+        '<p class="kicker">Veracity synopsis</p>',
+        f"<h2>{html.escape(synopsis.rating)}</h2>",
+        f"<p>{html.escape(synopsis.summary)}</p>",
+    ]
+    if synopsis.caveats:
+        items = "".join(f"<li>{html.escape(item)}</li>" for item in synopsis.caveats)
+        bits.append(f"<ul>{items}</ul>")
+    if synopsis.unchecked_count:
+        word = "claim" if synopsis.unchecked_count == 1 else "claims"
+        verb = "was" if synopsis.unchecked_count == 1 else "were"
+        bits.append(f"<p>{synopsis.unchecked_count} important {word} {verb} not checked.</p>")
+    bits.append("</section>")
+    return "".join(bits)
+
+
 def render_report(verification: VerificationOut) -> str:
-    body = "".join(_article(claim) for claim in verification.claims) or "<p>No claims were extracted.</p>"
+    articles = "".join(_article(claim) for claim in verification.claims) or "<p>No claims were extracted.</p>"
+    body = _draft(verification) + articles + _synopsis(verification)
     meta = f"{html.escape(verification.verification_id)} · {html.escape(verification.created_at)}"
     return _PAGE.format(
         title=html.escape(SERVICE_NAME),

@@ -11,6 +11,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import Field
 
 from factcheck.billing import BillingError, ClientIdentity
+from factcheck.questions import DraftError
 from factcheck.branding import SERVICE_NAME
 from factcheck.schemas import DISCLAIMER
 
@@ -108,5 +109,7 @@ async def _verify(service, *, text, claims) -> str:
     try:
         result = await anyio.to_thread.run_sync(run)
     except BillingError as exc:
+        raise ToolError(json.dumps(exc.body())) from exc
+    except DraftError as exc:
         raise ToolError(json.dumps(exc.body())) from exc
     return json.dumps(result.model_dump(mode="json"), ensure_ascii=False)

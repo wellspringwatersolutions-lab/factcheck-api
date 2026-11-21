@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 
 from factcheck.types import ExtractedClaim
 
@@ -14,6 +15,75 @@ _OUTLETS = re.compile(
 )
 _OFFER = re.compile(r"\bwant to (compare|see|know|learn)\b", re.I)
 _YES = re.compile(r"^(yes|no|sure|ok|okay)[.!]?$", re.I)
+_USER_ROLES = {"user", "human", "you", "question"}
+_TURN = re.compile(
+    r"^(?:#{1,3}\s*)?(?:\*\*|__)?\s*"
+    r"(?P<role>user|human|you|question|assistant|ai|model|gemini|chatgpt|claude|bot|answer)"
+    r"\s*(?:\*\*|__)?\s*[:：]\s*(?P<rest>.*)$",
+    re.I,
+)
+_TURN_HEADER = re.compile(
+    r"^(?:#{1,3}\s*)?(?:\[)?(?:\*\*|__)?\s*"
+    r"(?P<role>user|human|you|question|assistant|ai|model|gemini|chatgpt|claude|bot|answer)"
+    r"\s*(?:\*\*|__)?(?:\])?\s*$",
+    re.I,
+)
+
+
+@dataclass
+class Dialogue:
+    """A pasted chat. The user's turns are context. The last assistant turn is the position to check."""
+
+    question: str
+    answer: str
+
+
+def _role(name: str) -> str:
+    return "user" if name.lower() in _USER_ROLES else "assistant"
+
+
+def split_dialogue(text: str) -> Dialogue | None:
+    """Detect user/assistant turns. Returns None when the paste is a single answer."""
+    turns: list[tuple[str, list[str]]] = []
+    current: tuple[str, list[str]] | None = None
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        inline = _TURN.match(line)
+        header = None if inline else _TURN_HEADER.match(line)
+        if inline or header:
+            role = _role((inline or header).group("role"))
+            current = (role, [])
+            turns.append(current)
+            rest = inline.group("rest").strip() if inline else ""
+            if rest:
+                current[1].append(rest)
+            continue
+        if current is not None and line:
+            current[1].append(line)
+    users = [" ".join(lines).strip() for role, lines in turns if role == "user" and lines]
+    answers = ["\n".join(lines).strip() for role, lines in turns if role == "assistant" and lines]
+    if not users or not answers:
+        return None
+    return Dialogue(question=users[-1], answer=answers[-1])
+
+
+def answer_text(text: str) -> str:
+    dialogue = split_dialogue(text)
+    return dialogue.answer if dialogue else (text or "")
+
+
+def is_bare_question(text: str | None) -> bool:
+    """A short question with no answer attached. A pasted answer that ends in '?' is not one."""
+    cleaned = " ".join((text or "").split())
+    if not cleaned.endswith("?") or cleaned.count("?") != 1:
+        return False
+    body = cleaned[:-1].strip()
+    if not body or re.search(r"[.!]", body):
+        return False
+    words = body.split()
+    return 3 <= len(words) <= 40
+
+
 _HEADER_CELL = {
     "supplement",
     "supplements",
@@ -59,9 +129,9 @@ def _table_row(line: str) -> str | None:
 
 
 def prepare_answer(text: str) -> str:
-    """Drop citation chrome, offers, and questions. Split table rows into their own lines."""
+    """Drop citation chrome, offers, questions, and earlier chat turns. Split table rows into their own lines."""
     kept: list[str] = []
-    for raw in (text or "").splitlines():
+    for raw in answer_text(text).splitlines():
         line = raw.strip()
         if not line:
             continue
