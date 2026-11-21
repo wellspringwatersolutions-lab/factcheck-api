@@ -109,6 +109,8 @@ That starts the API on port 8741, Postgres, and Redis. Put keys in `.env`. `.env
 | `FREE_DAILY_SPEND_CAP_USD` | Global cap for free checks. Default `20`. |
 | `CREDITS_PER_CHECK` | Credits deducted per paid check. Default `1`. |
 | `PUBLIC_BASE_URL` / `UPGRADE_URL` | Used in discovery docs and the upgrade line. |
+| `OWNER_IPS` | Comma-separated client IPs that skip the one-free-check limit. They still count toward `FREE_DAILY_CAP_USD`. Behind Render, the client IP is the first `X-Forwarded-For` hop. |
+| `OWNER_KEY` | Optional. Send `X-Owner-Key` for the same bypass. Leave this empty in the repo. |
 
 Model ids were checked against `GET https://llm.chutes.ai/v1/models` on 21 Nov 2026. The catalog does not need a key. Refresh warnings with:
 

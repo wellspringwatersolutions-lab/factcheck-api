@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -32,6 +33,8 @@ from factcheck.schemas import (
 )
 from factcheck.textutil import is_fragile, jaccard, normalize_text, overlap
 from factcheck.types import Evidence, ExtractedClaim, UsageMeter
+
+logger = logging.getLogger("factcheck")
 
 
 def _labels_disagree(left, right) -> bool:
@@ -192,6 +195,8 @@ class VerificationService:
                 warnings.append("claim_limit")
             outputs = self._run(extracted, meter, warnings)
             payload = self._assemble(text, claims, outputs, meter, warnings, client, charge)
+            if payload.usage.tier == "owner":
+                logger.info("verification %s tier=owner ip=%s", payload.verification_id, getattr(client, "ip", ""))
             self.store.save(payload, fingerprint=getattr(client, "fingerprint", None), tier=payload.usage.tier, api_key_id=getattr(reservation, "api_key_id", None))
             if charge:
                 if disconnect_check and disconnect_check():
@@ -468,8 +473,14 @@ class VerificationService:
         tier = "eval"
         credits = 0.0
         if charge:
-            tier = "paid" if getattr(client, "api_key", None) else "free"
-            credits = self.settings.credits_per_check if tier == "paid" else 0.0
+            if getattr(client, "owner", False):
+                tier = "owner"
+                credits = 0.0
+            elif getattr(client, "api_key", None):
+                tier = "paid"
+                credits = self.settings.credits_per_check
+            else:
+                tier = "free"
         if text:
             compact = " ".join(text.split())
             summary_in = compact[:240] + ("…" if len(compact) > 240 else "")

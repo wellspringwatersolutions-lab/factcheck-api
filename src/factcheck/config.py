@@ -78,6 +78,8 @@ class Settings(BaseSettings):
 
     bootstrap_api_key: str = ""
     bootstrap_credits: float = 0.0
+    owner_ips: str = ""
+    owner_key: str = ""
 
     # USD per million tokens. Unknown models use the conservative default.
     default_input_usd_per_million: float = 1.0

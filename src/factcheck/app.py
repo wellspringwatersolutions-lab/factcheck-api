@@ -12,7 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from mcp.server.transport_security import TransportSecuritySettings
 
-from factcheck.billing import BillingError, ClientIdentity
+from factcheck.billing import BillingError, ClientIdentity, owner_ips, owner_key_matches, resolve_client_ip
 from factcheck.config import Settings, get_settings
 from factcheck.discovery import llms_txt, manifest
 from factcheck.mcp_server import build_mcp, current_identity, reset_identity, set_identity
@@ -24,8 +24,9 @@ from factcheck.wiring import build_service
 
 
 class IdentityMiddleware:
-    def __init__(self, app):
+    def __init__(self, app, settings: Settings | None = None):
         self.app = app
+        self.settings = settings
 
     async def __call__(self, scope, receive, send):
         if scope.get("type") != "http":
@@ -35,11 +36,15 @@ class IdentityMiddleware:
         client = scope.get("client") or ("unknown", 0)
         auth = headers.get("authorization", "")
         api_key = auth[7:].strip() if auth.lower().startswith("bearer ") else headers.get("x-api-key")
+        ip = resolve_client_ip(headers, str(client[0]))
+        configured_ips = owner_ips(self.settings.owner_ips) if self.settings else set()
+        owner = ip in configured_ips or owner_key_matches(headers.get("x-owner-key"), self.settings.owner_key if self.settings else "")
         identity = ClientIdentity(
-            ip=str(client[0]),
+            ip=ip,
             user_agent=headers.get("user-agent", ""),
             fingerprint_header=headers.get("x-client-fingerprint", ""),
             api_key=api_key or None,
+            owner=owner,
         )
         token = set_identity(identity)
         try:
@@ -81,7 +86,7 @@ def create_app(settings: Settings | None = None, service=None) -> FastAPI:
     app = FastAPI(title=settings.service_name, lifespan=lifespan)
     app.state.settings = settings
     app.state.service = service
-    app.add_middleware(IdentityMiddleware)
+    app.add_middleware(IdentityMiddleware, settings=settings)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["https://wellspringwatersolutions-lab.github.io"],
