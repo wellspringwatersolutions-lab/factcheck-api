@@ -105,7 +105,7 @@ def test_disagreement_keeps_the_more_cautious_verdict():
     result = _result()
     run_review(result, reviewer=reviewer, deadline=None, meter=meter)
     assert result.claims[0].verdict == "Unverified"
-    assert any("more cautious" in item for item in result.synopsis.caveats)
+    assert not any("more cautious" in item for item in result.synopsis.caveats)
 
 
 def test_review_is_skipped_when_the_budget_is_gone():

@@ -34,6 +34,7 @@ def answer_for_rating(rating: str) -> str:
         "Mostly inaccurate": "no",
         "Accurate": "yes",
         "Mostly accurate": "yes",
+        "Partly verified": "partly",
     }.get(rating, "not_enough_evidence")
 
 
@@ -106,6 +107,7 @@ def reconcile_answer(result: VerificationOut) -> None:
             "Mixed": "partly",
             "Inaccurate": "no",
             "Mostly inaccurate": "no",
+            "Partly verified": "partly",
         }.get(result.synopsis.rating, "yes" if result.synopsis.rating in {"Accurate", "Mostly accurate"} else "not_enough_evidence")
         return
     draft = result.draft_answer
@@ -147,6 +149,10 @@ def reconcile_answer(result: VerificationOut) -> None:
             caveats.append(item)
     rating = _rating_for(answer, caveats if answer in {"yes", "no"} else [], supported)
     tldr = _tldr(answer, draft.text, caveats, correction)
+    if answer == "not_enough_evidence":
+        note = "The evidence for this answer is thin."
+        if note not in result.synopsis.caveats:
+            result.synopsis.caveats.append(note)
     result.synopsis.answer = answer
     result.synopsis.rating = rating
     result.synopsis.tldr = tldr
@@ -158,12 +164,10 @@ def reconcile_answer(result: VerificationOut) -> None:
 
 def _align_draft(draft, answer: str, correction: str) -> None:
     text = (draft.text or "").strip()
+    text = re.sub(r"(?i)^unconfirmed:\s*", "", text).strip()
+    text = re.sub(r"(?i)\s*The evidence for this answer is thin\.?", "", text).strip()
     if correction and not text.lower().startswith("correction:"):
         text = f"{correction}\n\n{text}"
-    elif answer == "not_enough_evidence":
-        text = re.sub(r"(?i)^unconfirmed:\s*", "", text).strip()
-        if "evidence for this answer is thin" not in text.lower():
-            text = text.rstrip() + " The evidence for this answer is thin."
     elif answer in {"yes", "no", "partly"} and not _starts(text, answer):
         text = f"{_lead(answer)}. {text}"
     draft.text = text

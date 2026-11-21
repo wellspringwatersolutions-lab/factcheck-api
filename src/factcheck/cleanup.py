@@ -189,6 +189,22 @@ def chunk_paragraphs(text: str, size: int = 1200) -> list[str]:
     return chunks
 
 
+def strip_labels(text: str) -> str:
+    """Drop 'Heading (note):' prefixes, markdown headings, and bold labels."""
+    cleaned = (text or "").strip()
+    cleaned = re.sub(r"^#{1,6}\s+", "", cleaned)
+    bold = re.match(r"^\*\*(.+?)\*\*:?\s*(?P<rest>.*)$", cleaned)
+    if bold and bold.group("rest").strip():
+        cleaned = bold.group("rest").strip()
+    headed = re.match(
+        r"^(?P<head>[A-Z][^:\n]{0,80}?)\s*(?:\([^)\n]{0,80}\))?\s*:\s+(?P<rest>.+)$",
+        cleaned,
+    )
+    if headed and len(headed.group("rest").split()) >= 4:
+        return headed.group("rest").strip()
+    return cleaned
+
+
 def prepare_answer(text: str) -> str:
     """Drop citation chrome, offers, questions, and earlier chat turns. Split table rows into their own lines."""
     kept: list[str] = []
@@ -209,7 +225,7 @@ def prepare_answer(text: str) -> str:
         line = _CITE_TAIL.sub("", line)
         if _SOURCE_LINE.match(line) or _YES.match(line) or _OFFER.search(line) or line.endswith("?"):
             continue
-        cleaned = clean_claim_text(line)
+        cleaned = strip_labels(clean_claim_text(line))
         if _OFFER.search(cleaned) or cleaned.endswith("?") or len(cleaned.split()) < 4:
             continue
         kept.append(cleaned if cleaned.endswith((".", "!", '"')) else cleaned)

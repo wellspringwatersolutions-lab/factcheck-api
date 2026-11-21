@@ -271,12 +271,7 @@ def screen_hits(
         if hit.grade in {"A", "B"} or is_official(hit.url) or is_fact_checker(hit.url, hit.source_type)
     ]
     if reputable:
-        kept = [
-            hit
-            for hit in kept
-            if not is_travel_page(hit.url, f"{hit.title} {hit.snippet}")
-            and not is_prepper_blog(hit.url, f"{hit.title} {hit.snippet}", hit.grade)
-        ]
+        kept = reputable
     kept = kept[:4]
     logger.warning(
         "retrieval claim=%r returned=%d kept=%d drops=%s",

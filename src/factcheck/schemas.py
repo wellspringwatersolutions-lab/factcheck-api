@@ -133,6 +133,7 @@ class SynopsisOut(BaseModel):
         "Mostly inaccurate",
         "Inaccurate",
         "Not enough evidence",
+        "Partly verified",
     ]
     summary: str
     tldr: str = ""

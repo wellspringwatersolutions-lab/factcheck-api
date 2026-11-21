@@ -82,6 +82,10 @@ def create_app(settings: Settings | None = None, service=None) -> FastAPI:
     ):
         settings.llm_mode = "mock"
     service = service or build_service(settings)
+    logger.warning(
+        "google fact-check retriever %s",
+        "enabled" if settings.google_factcheck_api_key else "disabled",
+    )
     mcp = build_mcp(service)
     mcp_app = mcp.streamable_http_app(stateless_http=True, transport_security=_security(settings))
 

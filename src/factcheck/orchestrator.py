@@ -15,8 +15,8 @@ from uuid import uuid4
 
 from factcheck.aggregate import RULES_VERSION, decide
 from factcheck.categories import CATEGORIES, EFFORT_LIMITS, effort_for, is_math, normalize_claim
-from factcheck.checks import UrlChecker, apply_debunk_labels, apply_passage_checks, passage_check_rows
-from factcheck.cleanup import focus_query, is_bare_question, peel_leading_question, priority, split_dialogue
+from factcheck.checks import UrlChecker, apply_passage_checks, passage_check_rows
+from factcheck.cleanup import focus_query, is_bare_question, peel_leading_question, priority, split_dialogue, strip_labels
 from factcheck.extract import fallback_points, heuristic_extract, select_key_points, standalone_claim
 from factcheck.queries import heuristic_queries, news_window
 from factcheck.request_ctx import (
@@ -30,7 +30,8 @@ from factcheck.request_ctx import (
     retrieval_calls,
     set_phase,
 )
-from factcheck.retain import drop_invented_negative, entity_mismatch, blocked_site, screen_hits
+from factcheck.checks import apply_debunk_labels, is_debunk
+from factcheck.retain import drop_invented_negative, entity_mismatch, blocked_site, is_fact_checker, screen_hits
 from factcheck.compute import recompute
 from factcheck.credibility import annotate, dedupe_syndicated, dedupe_urls, drop_circular
 from factcheck.judge import apply_verified_labels
@@ -50,10 +51,60 @@ from factcheck.schemas import (
     VerificationOut,
 )
 from factcheck.synopsis import build_synopsis
-from factcheck.textutil import is_fragile, jaccard, normalize_text, overlap
+from factcheck.textutil import is_fragile, jaccard, normalize_text, overlap, split_sentences
 from factcheck.types import Evidence, ExtractedClaim, UsageMeter
 
 logger = logging.getLogger("factcheck")
+
+
+def _share_factchecks(claims: list[ClaimOut]) -> None:
+    """A fact-checker debunk found for one claim can back a related claim in the same check."""
+    pool = []
+    for claim in claims:
+        for source in claim.sources:
+            text = source.quote or source.snippet or ""
+            if is_fact_checker(source.url, source.source_type) or is_debunk(text):
+                pool.append(source)
+    for claim in claims:
+        if claim.claim_type != "fact" or claim.verdict in {"Supported", "Contradicted"}:
+            continue
+        have = {source.url for source in claim.sources}
+        extras = []
+        for source in pool:
+            if source.url in have:
+                continue
+            if overlap(claim.text, source.quote or source.snippet or "") < 0.2:
+                continue
+            extras.append(source)
+            have.add(source.url)
+        if not extras:
+            continue
+        evidence = []
+        for source in [*claim.sources, *extras]:
+            text = source.quote or source.snippet or ""
+            evidence.append(
+                Evidence(
+                    url=source.url,
+                    title=source.title,
+                    snippet=source.snippet,
+                    quote=source.quote or text[:400],
+                    page_text=text,
+                    grade=source.grade or "B",
+                    source_type=source.source_type or "fact_checker",
+                    entailment="entails" if is_debunk(text) else (source.entailment or "neutral"),
+                    used=True,
+                    origin_id=source.origin_id or source.url,
+                )
+            )
+        evidence = apply_debunk_labels(claim.text, evidence)
+        decision = decide(evidence, category=claim.claim_category or "T6", claim_text=claim.text)
+        if decision.verdict not in {"Supported", "likely_true"}:
+            continue
+        claim.verdict = decision.verdict
+        claim.reasoning = decision.reasoning
+        claim.strength_of_support = decision.strength_of_support
+        claim.confidence = decision.strength_of_support
+        claim.sources.extend(extras)
 
 
 def _clean_conjunctions(sentence: str) -> list[str]:
@@ -285,6 +336,8 @@ class VerificationService:
         reservation = self.billing.authorize(client) if charge else None
         meter = UsageMeter()
         state, token = begin_request(meter)
+        if hasattr(self.retriever, "bind_budget"):
+            self.retriever.bind_budget(state)
         state.disconnect = disconnect_check
         state.on_progress = on_progress
         started = started_at if started_at is not None else time.monotonic()
@@ -342,8 +395,25 @@ class VerificationService:
                         extracted = fallback_points(check_text)
                         if not any(item.startswith("extraction_fallback") for item in warnings):
                             warnings.append("extraction_fallback:TimeoutError")
+            for item in extracted:
+                item.text = strip_labels(item.text)
             if mode == "question":
                 extracted = drop_invented_negative(extracted, asked)
+                have = {" ".join(item.text.lower().split()) for item in extracted}
+                for sentence in split_sentences(check_text or ""):
+                    if len(extracted) >= 3:
+                        break
+                    sentence = strip_labels(sentence).strip()
+                    if sentence and sentence[-1] not in ".!?":
+                        sentence += "."
+                    if not sentence or " ".join(sentence.lower().split()) in have:
+                        continue
+                    if drop_invented_negative([type("C", (), {"text": sentence})()], asked) == []:
+                        continue
+                    if not standalone_claim(sentence):
+                        continue
+                    extracted.append(normalize_claim(ExtractedClaim(text=sentence, claim_type="fact", span=sentence)))
+                    have.add(" ".join(sentence.lower().split()))
             if check_claims is None and preclassified is None and not any(item.startswith("extraction_fallback") for item in warnings):
                 extracted = _split_key_points(extracted)
             elif check_claims is None and preclassified is None:
@@ -358,6 +428,7 @@ class VerificationService:
                 extracted = extracted[: self.settings.max_output_claims]
                 warnings.append("claim_limit")
             outputs = self._run(extracted, meter, warnings, deadline - 16)
+            _share_factchecks(outputs)
             payload = self._assemble(
                 asked or text,
                 claims,

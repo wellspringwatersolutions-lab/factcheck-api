@@ -21,6 +21,7 @@ _RATINGS = (
     "Mostly inaccurate",
     "Inaccurate",
     "Not enough evidence",
+    "Partly verified",
 )
 _NUANCE = re.compile(r"\b(but|however|although|though|technically|except|nonetheless|nevertheless)\b", re.I)
 _NEGATION = re.compile(r"\b(never|not|no|wasn't|weren't|isn't|aren't|didn't|without|neither)\b", re.I)
@@ -46,6 +47,8 @@ Write summary as one to three plain sentences that answer the question from the 
 Also write tldr as one complete sentence of at most 30 words. It must start with a capital letter, end with a period, and must not start with a comma or the word but.
 Do not add any person, place, date, number, or event that is not written in the brief.
 If the rating is "Not enough evidence", both summary and tldr must say there was not enough evidence, and must not sound confident.
+If the rating is "Partly verified" or "Mostly accurate", say which claims were confirmed and which could not be confirmed.
+Every sentence must be a complete sentence.
 Return JSON {{"summary": "...", "tldr": "..."}}"""
 
 
@@ -107,7 +110,11 @@ def rate_claims(claims: list[ClaimOut]) -> tuple[str, list[str], int]:
         return "Not enough evidence", caveats, unchecked_count
     decided = [claim for claim in facts if claim.verdict in {"Supported", "likely_true", "Contradicted", "Conflicting"}]
     unverified = [claim for claim in facts if claim.verdict in {"Unverified", "Unsupported", None}]
-    if not decided or len(unverified) >= len(decided):
+    good = [claim for claim in facts if claim.verdict in {"Supported", "likely_true"}]
+    if good and not any(claim.verdict in {"Contradicted", "Conflicting"} for claim in facts) and len(good) * 2 >= len(facts):
+        if unverified:
+            return "Partly verified", caveats, unchecked_count
+    if not decided or len(unverified) > len(decided):
         return "Not enough evidence", caveats, unchecked_count
     supported = [claim for claim in decided if claim.verdict == "Supported"]
     likely = [claim for claim in decided if claim.verdict == "likely_true"]
@@ -156,9 +163,16 @@ def _direct(question: str | None, main: list[str]) -> str:
 
 def fallback_summary(rating: str, question: str | None, claims: list[ClaimOut], caveats: list[str], unchecked_count: int) -> str:
     facts = _checked_facts(claims)
-    supported = [claim.text for claim in facts if claim.verdict == "Supported"]
+    supported = [claim.text for claim in facts if claim.verdict in {"Supported", "likely_true"}]
     contradicted = [claim.text for claim in facts if claim.verdict == "Contradicted"]
     unverified = [claim for claim in facts if claim.verdict in {"Unverified", "Unsupported", None}]
+    if rating == "Partly verified":
+        held = [text.rstrip(".") for text in supported[:2]]
+        missed = [claim.text.rstrip(".") for claim in unverified[:2]]
+        parts = [f"{rating}."]
+        parts.extend(f"{item}." for item in held)
+        parts.extend(f"{item} could not be confirmed." for item in missed)
+        return polish_prose(" ".join(parts))
     if rating == "Not enough evidence":
         parts = ["Not enough evidence."]
         if question:
@@ -498,6 +512,13 @@ class LLMSynopsis:
         tldr = payload.get("tldr")
         if not isinstance(summary, str) or not summary.strip():
             return None
+        body = summary.strip()
+        if body.lower().startswith(rating.lower()):
+            body = body[len(rating):].lstrip(" .")
+        if not complete_sentence(body):
+            return None
+        if isinstance(tldr, str) and tldr.strip() and not complete_sentence(tldr.strip()):
+            tldr = ""
         return {
             "summary": summary.strip(),
             "tldr": tldr.strip() if isinstance(tldr, str) else "",

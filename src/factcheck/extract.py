@@ -428,31 +428,47 @@ class LiveExtractor:
                 raise ValueError("unrepairable json")
             return payload
 
+    def extraction_models(self) -> list[str]:
+        """Qwen first, then DeepSeek. The extract-model setting is not used."""
+        return ["Qwen/Qwen3.5-397B-A17B-TEE", "deepseek-ai/DeepSeek-V3.2-TEE"]
+
     def _one_chunk(self, chunk: str) -> list[ExtractedClaim]:
-        result = self.client.complete(
-            model=self.model,
-            messages=[
-                {"role": "system", "content": _DECOMPOSE},
-                {"role": "user", "content": chunk},
-            ],
-            temperature=0.0,
-            max_tokens=700,
-            timeout=15.0,
-            response_format=_CLAIM_SCHEMA,
-        )
-        charge_tokens(
-            self.meter,
-            model=result.model,
-            provider=result.provider,
-            input_tokens=result.input_tokens,
-            output_tokens=result.output_tokens,
-            cost=estimate_cost(self.settings, result.model, result.input_tokens, result.output_tokens),
-        )
-        claims = _claims_from_result(result)
-        if not claims:
-            logger.warning("extraction ValueError: decomposition returned no claims snippet=%r", (result.content or "")[:400])
-            raise ValueError("decomposition returned no claims")
-        return claims
+        last_error: Exception | None = None
+        for model in self.extraction_models():
+            try:
+                result = self.client.complete(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": _DECOMPOSE},
+                        {"role": "user", "content": chunk},
+                    ],
+                    temperature=0.0,
+                    max_tokens=700,
+                    timeout=10.0,
+                    response_format=_CLAIM_SCHEMA,
+                )
+            except (LLMError, TimeoutError, ValueError, TypeError) as exc:
+                last_error = exc
+                logger.warning("extraction model=%s failed %s", model, exc.__class__.__name__)
+                continue
+            logger.warning("extraction model=%s", result.model or model)
+            charge_tokens(
+                self.meter,
+                model=result.model,
+                provider=result.provider,
+                input_tokens=result.input_tokens,
+                output_tokens=result.output_tokens,
+                cost=estimate_cost(self.settings, result.model, result.input_tokens, result.output_tokens),
+            )
+            try:
+                claims = _claims_from_result(result)
+            except (ValueError, TypeError) as exc:
+                last_error = exc
+                logger.warning("extraction model=%s failed %s", model, exc.__class__.__name__)
+                continue
+            if claims:
+                return claims
+        raise last_error or ValueError("decomposition returned no claims")
 
     def extract(self, text: str | None, claims: list[str] | None) -> tuple[list[ExtractedClaim], list[str]]:
         if claims:
@@ -508,7 +524,8 @@ class LiveExtractor:
         prepared = (prepare_answer(text) if text else "")[:6000]
         if not prepared:
             return []
-        model = getattr(self.settings, "judge_a_model", None) or "deepseek-ai/DeepSeek-V3.2-TEE"
+        model = self.extraction_models()[1]
+        logger.warning("extraction model=%s", model)
         result = self.client.complete(
             model=model,
             messages=[

@@ -233,7 +233,8 @@ def test_draft_is_not_evidence_when_nothing_is_retrieved():
     assert result.mode == "question"
     assert result.draft_answer.model == "mock-draft"
     assert not result.draft_answer.text.lower().startswith("unconfirmed:")
-    assert "evidence for this answer is thin" in result.draft_answer.text.lower()
+    assert "thin" not in result.draft_answer.text.lower()
+    assert any("thin" in item.lower() for item in result.synopsis.caveats)
     assert "Berlin" in result.draft_answer.text
     assert result.synopsis.answer == "not_enough_evidence"
     assert result.draft_answer.stance == "not_enough_evidence"

@@ -15,7 +15,33 @@ from factcheck.synopsis import (
     grounded,
 )
 
-_CAUTION = {"Supported": 0, "likely_true": 1, "Contradicted": 2, "Hypothesis": 3, "Conflicting": 4, "Unverified": 5}
+def _against(claim) -> bool:
+    return any(
+        (source.entailment == "contradicts" or source.stance == "contradicts") and (source.quote or source.snippet)
+        for source in claim.sources
+    )
+
+
+def _supports(claim) -> bool:
+    return any(
+        (source.entailment == "entails" or source.stance == "supports") and (source.quote or source.snippet)
+        for source in claim.sources
+    )
+
+
+def settle_disagreement(claim, original: str | None) -> str:
+    """Keep a sourced verdict. Do not invent Conflicting or Contradicted."""
+    proposed = claim.verdict or "Unverified"
+    original = original or "Unverified"
+    against = _against(claim)
+    supports = _supports(claim)
+    if proposed in {"Conflicting", "Contradicted"} and not against:
+        if original in {"Supported", "likely_true"} and supports:
+            return original
+        return "likely_true" if supports else "Unverified"
+    if proposed != original and original in {"Supported", "likely_true"} and supports and not against:
+        return original
+    return proposed
 _VERDICTS = {"Supported", "likely_true", "Contradicted", "Unverified", "Conflicting", "Hypothesis"}
 _INSTRUCTION = """You review a finished fact-check. You do not add facts.
 Flag a verdict that its own quote does not back.
@@ -24,10 +50,6 @@ You may not use your own knowledge. If no such quote exists, leave the verdict U
 Flag a tldr or summary that overstates or contradicts the claim verdicts, and propose a plainer wording using only those verdicts and quotes.
 In question mode the draft's yes or no, synopsis.answer, the tldr, and the rating must all agree.
 Return JSON {"corrections": [{"claim": "claim text", "to": "Supported|likely_true|Contradicted|Unverified|Conflicting|Hypothesis", "quote": "verbatim quote or empty", "reason": "short"}], "tldr": "", "summary": ""}"""
-
-
-def _caution(verdict: str | None) -> int:
-    return _CAUTION.get(verdict or "Unverified", 4)
 
 
 def _packet(result: VerificationOut) -> str:
@@ -210,23 +232,19 @@ def run_review(result: VerificationOut, *, reviewer: TwoPassReview, deadline: fl
     timeout = 6.0 if remaining is None else max(1.0, min(6.0, remaining - 0.2))
     second = _one(reviewer.pass2_model, timeout)
     second_changes = apply_corrections(result, second)
-    disagreed = False
     for claim in result.claims:
         if claim.claim_type == "opinion" or claim.verdict == "Hypothesis":
             continue
         earlier = after_first.get(claim.text)
-        if earlier != claim.verdict:
-            cautious = earlier if _caution(earlier) >= _caution(claim.verdict) else claim.verdict
-            if cautious != claim.verdict:
-                claim.verdict = cautious
-            disagreed = True
-    if disagreed and result.synopsis is not None:
-        note = "The two review passes disagreed. The more cautious verdict was kept."
-        if note not in result.synopsis.caveats:
-            result.synopsis.caveats.append(note)
-        result.synopsis = build_synopsis(list(result.claims), question=result.input_summary if result.mode == "question" else None, phrasing=None)
-        if note not in result.synopsis.caveats:
-            result.synopsis.caveats.append(note)
+        if earlier == claim.verdict and claim.verdict == original_verdicts.get(claim.text):
+            continue
+        claim.verdict = settle_disagreement(claim, original_verdicts.get(claim.text))
+    if any(original_verdicts.get(claim.text) != claim.verdict for claim in result.claims):
+        result.synopsis = build_synopsis(
+            list(result.claims),
+            question=result.input_summary if result.mode == "question" else None,
+            phrasing=None,
+        )
     reasons = {item.claim: item.reason for item in [*first_changes, *second_changes]}
     changes = [
         ReviewChange(claim=claim.text, **{"from": original_verdicts.get(claim.text) or "", "to": claim.verdict or "", "reason": reasons.get(claim.text, "Review correction.")})

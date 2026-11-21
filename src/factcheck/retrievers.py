@@ -36,6 +36,10 @@ class DesearchRetriever:
         self.client = client or httpx.Client(timeout=8.0)
         self.cost_usd = 0.0
         self.retrieval_calls = 0
+        self._budget = None
+
+    def bind_budget(self, state) -> None:
+        self._budget = state
 
     def _headers(self) -> dict[str, str]:
         return {"Authorization": self.api_key}
@@ -44,7 +48,7 @@ class DesearchRetriever:
         """One attempt, then one retry on a timeout or a 5xx. Each attempt counts toward the cap."""
 
         def once():
-            if not reserve_retrieval(budget):
+            if not reserve_retrieval(budget if budget is not None else getattr(self, "_budget", None)):
                 logger.warning("desearch call cap reached before %s", url)
                 return None
             self.retrieval_calls += 1
@@ -221,6 +225,12 @@ class CompositeRetriever:
         self.warnings: list[str] = []
         self.timeout = 8.0
         self.retrieval_calls = 0
+
+    def bind_budget(self, state) -> None:
+        for provider in self.providers:
+            bind = getattr(provider, "bind_budget", None)
+            if bind is not None:
+                bind(state)
 
     @property
     def cost_usd(self) -> float:
