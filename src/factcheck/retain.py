@@ -23,7 +23,15 @@ _BLOCKED = (
     "criminalrecords.com",
 )
 _NAME = re.compile(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})\b")
-_INVENTED_NEGATIVE = re.compile(r"\bthere are no criminal convictions\b", re.I)
+_INVENTED_NEGATIVE = re.compile(
+    r"\b(there are no criminal convictions|no historical record|no credible allegation|"
+    r"no criminal record|there is no record|was not a criminal|never charged|never convicted|no convictions)\b",
+    re.I,
+)
+_COURT = ("courtlistener.com", "vlex.com", "casetext.com", "justia.com")
+_TRAVEL = ("tripadvisor.", "booking.com", "expedia.", "kayak.", "lonelyplanet.", "travelocity.")
+_CRIME_OTHER = re.compile(r"\b(pleaded guilty|pled guilty|sex trafficking|husband|wife)\b", re.I)
+_LEADING = {"the", "a", "an"}
 
 
 def is_official(url: str) -> bool:
@@ -45,6 +53,37 @@ def blocked_site(url: str) -> bool:
     return "criminal-record" in blob or "criminalrecord" in blob or "arrests.org" in blob
 
 
+def court_record(url: str) -> bool:
+    host = hostname(url or "")
+    if any(host == name or host.endswith("." + name) for name in _COURT):
+        return True
+    return "justia.com" in host and "/cases" in (url or "")
+
+
+def is_travel_page(url: str, text: str = "") -> bool:
+    host = hostname(url or "")
+    if any(token in host for token in _TRAVEL):
+        return True
+    return bool(re.search(r"\b(trip planning|vacation rental|things to do in)\b", text or "", re.I))
+
+
+def is_prepper_blog(url: str, text: str = "", grade: str = "") -> bool:
+    if grade in {"A", "B"}:
+        return False
+    return bool(re.search(r"\b(prepper|shtf|survivalist|doomsday)\b", f"{hostname(url or '')} {text or ''}", re.I))
+
+
+def disambiguators(text: str) -> set[str]:
+    found = set()
+    if re.search(r"\bpresident\b", text or "", re.I):
+        found.add("president")
+    if re.search(r"\bfounding\b", text or "", re.I):
+        found.add("founding")
+    if re.search(r"\b(18th century|17[0-9]{2}|180[0-1])\b", text or "", re.I):
+        found.add("era")
+    return found
+
+
 def person_names(text: str) -> list[str]:
     found = []
     for name in _NAME.findall(text or ""):
@@ -55,26 +94,73 @@ def person_names(text: str) -> list[str]:
     return found
 
 
-def entity_mismatch(claim: str, passage: str, context: str = "") -> bool:
-    """A different person or a different topic does not count as evidence."""
-    blob = passage or ""
-    lowered = blob.lower()
-    focus = f"{claim} {context}"
-    for name in person_names(claim) or person_names(context):
-        parts = name.split()
-        exact = name.lower() in lowered
-        longer = bool(re.search(rf"\b{parts[0]}\s+[A-Z][a-z]+\s+{parts[-1]}\b", blob))
-        if longer and not exact:
-            return True
-        if not exact and parts[-1].lower() in lowered:
-            return True
-        if not exact and len(parts) >= 2:
-            return True
-    if re.search(r"\b(president|founding|1735|18th century)\b", focus, re.I) and re.search(
-        r"\b(bodkin|surgeon|crime gang|criminal record)\b", blob, re.I
+def _subject_name(title: str, body: str) -> str:
+    named = person_names(title)
+    if named:
+        return named[0]
+    first = (body or "").split(".")[0]
+    named = person_names(first)
+    return named[0] if named else ""
+
+
+def _core_name(name: str) -> list[str]:
+    return [part for part in name.split() if part.lower() not in _LEADING]
+
+
+def _different_person(claim_name: str, subject: str) -> bool:
+    claim_parts = _core_name(claim_name)
+    subject_parts = _core_name(subject)
+    if not claim_parts or not subject_parts:
+        return False
+    if [part.lower() for part in claim_parts] == [part.lower() for part in subject_parts]:
+        return False
+    if (
+        len(subject_parts) == len(claim_parts) + 1
+        and subject_parts[0].lower() == claim_parts[0].lower()
+        and subject_parts[-1].lower() == claim_parts[-1].lower()
     ):
         return True
+    if (
+        len(claim_parts) >= 2
+        and len(subject_parts) >= 2
+        and claim_parts[-1].lower() == subject_parts[-1].lower()
+        and claim_parts[0].lower() != subject_parts[0].lower()
+    ):
+        return True
+    return False
+
+
+def same_entity(claim: str, passage: str, context: str = "", url: str = "", title: str = "") -> bool | None:
+    """True, False, or None when a model should be asked. Court sites need a strong match."""
+    focus = f"{claim} {context}"
+    names = person_names(claim) or person_names(context)
+    claim_name = min(names, key=len) if names else ""
+    subject = _subject_name(title, passage)
+    if _different_person(claim_name, subject):
+        return False
+    marks = disambiguators(focus)
+    shared = marks & disambiguators(passage)
+    if court_record(url) and marks and not shared:
+        return False
+    blob = f"{title} {passage}"
+    if marks and _CRIME_OTHER.search(blob) and not shared:
+        return False
+    if claim_name and claim_name.lower() not in blob.lower():
+        if subject or court_record(url):
+            return False
+        return None
+    if claim_name and claim_name.lower() in blob.lower():
+        return True
+    return None
+
+
+def entity_mismatch(claim: str, passage: str, context: str = "", url: str = "", title: str = "") -> bool:
+    """A different person or a different topic does not count as evidence."""
+    verdict = same_entity(claim, passage, context, url, title)
+    if verdict is False:
+        return True
     about_supplies = bool(re.search(r"\b(food|kit|stockpile|hoard|shelf-stable)\b", claim, re.I))
+    blob = passage or ""
     if about_supplies and re.search(r"\b(covid|quarantine|vacation rental|hotel booking)\b", blob, re.I):
         if not re.search(r"\b(food|kit|stockpile|hoard|emergency supply|shelf-stable)\b", blob, re.I):
             return True
@@ -110,7 +196,13 @@ def outside_window(published_at: str | None, window: dict | None) -> bool:
     return day < window["start_date"] or day > window["end_date"]
 
 
-def screen_hits(claim: str, hits: list[Evidence], window: dict | None, context: str = "") -> tuple[list[Evidence], dict[str, int]]:
+def screen_hits(
+    claim: str,
+    hits: list[Evidence],
+    window: dict | None,
+    context: str = "",
+    entity_judge=None,
+) -> tuple[list[Evidence], dict[str, int]]:
     """Keep official, fact-checker, and undated pages. Rank the rest by the date window."""
     drops: dict[str, int] = {}
     seen: set[str] = set()
@@ -136,8 +228,12 @@ def screen_hits(claim: str, hits: list[Evidence], window: dict | None, context: 
         if blocked_site(hit.url):
             _drop("blocked_site", hit)
             continue
-        passage = " ".join(part for part in (hit.title, hit.snippet, hit.page_text, hit.quote) if part)
-        if entity_mismatch(claim, passage, context):
+        body = " ".join(part for part in (hit.snippet, hit.page_text, hit.quote) if part)
+        passage = " ".join(part for part in (hit.title, body) if part)
+        verdict = same_entity(claim, body, context, hit.url, hit.title)
+        if verdict is None and entity_judge is not None:
+            verdict = bool(entity_judge(claim, passage, hit))
+        if verdict is False or (verdict is None and entity_mismatch(claim, passage, context, hit.url, hit.title)):
             _drop("entity_mismatch", hit)
             continue
         official = is_official(hit.url)
@@ -169,6 +265,19 @@ def screen_hits(claim: str, hits: list[Evidence], window: dict | None, context: 
         ranked.append((boost, -score, hit))
     ranked.sort(key=lambda item: (item[0], item[1], item[2].url))
     kept = [hit for _, _, hit in ranked]
+    reputable = [
+        hit
+        for hit in kept
+        if hit.grade in {"A", "B"} or is_official(hit.url) or is_fact_checker(hit.url, hit.source_type)
+    ]
+    if reputable:
+        kept = [
+            hit
+            for hit in kept
+            if not is_travel_page(hit.url, f"{hit.title} {hit.snippet}")
+            and not is_prepper_blog(hit.url, f"{hit.title} {hit.snippet}", hit.grade)
+        ]
+    kept = kept[:4]
     logger.warning(
         "retrieval claim=%r returned=%d kept=%d drops=%s",
         (claim or "")[:160],

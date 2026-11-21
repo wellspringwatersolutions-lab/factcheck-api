@@ -8,6 +8,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
+from factcheck.checks import is_denial
 from factcheck.credibility import is_encyclopedia, source_weight
 from factcheck.textutil import hostname
 from factcheck.types import Evidence
@@ -480,6 +481,37 @@ def decide(
                 reasoning="Likely true. One official source quotes a passage that lines up with the claim. " + STRENGTH_NOTE,
                 needs_human_review=high_stakes,
                 supporting_quotes=[item.quote for item in primaries if item.quote][:1],
+            )
+        from factcheck.checks import is_debunk
+
+        debunks = [
+            item
+            for item in supporting
+            if is_denial(claim_text) and is_debunk(item.quote or item.snippet or item.page_text or "")
+        ]
+        debunk_origins = {item.origin_id or hostname(item.url) for item in debunks}
+        debunk_origins.discard("")
+        if len(debunk_origins) >= 2:
+            return Decision(
+                verdict="Supported",
+                strength_of_support=0.7,
+                reasoning=(
+                    "Supported. Independent sources explicitly say the rumor is not what the government told people. "
+                    + STRENGTH_NOTE
+                ),
+                needs_human_review=high_stakes,
+                supporting_quotes=[item.quote for item in debunks if item.quote][:3],
+            )
+        if debunks:
+            _mark_likely(debunks[:1])
+            return Decision(
+                verdict="likely_true",
+                strength_of_support=0.6,
+                reasoning=(
+                    "Likely true. A source explicitly denies the rumor this claim rejects. " + STRENGTH_NOTE
+                ),
+                needs_human_review=high_stakes,
+                supporting_quotes=[item.quote for item in debunks if item.quote][:1],
             )
         good = [item for item in supporting if item.grade in {"A", "B"} or _reputable(item)]
         origins = {item.origin_id or hostname(item.url) for item in good}

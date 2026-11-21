@@ -180,7 +180,7 @@ class TwoPassReview:
 
 def run_review(result: VerificationOut, *, reviewer: TwoPassReview, deadline: float | None, meter) -> None:
     remaining = None if deadline is None else deadline - time.monotonic()
-    if remaining is not None and remaining < 5:
+    if remaining is not None and remaining < 1:
         result.warnings = list(dict.fromkeys([*result.warnings, "review skipped"]))
         result.review = ReviewOut()
         return
@@ -200,17 +200,16 @@ def run_review(result: VerificationOut, *, reviewer: TwoPassReview, deadline: fl
         attempted.append(model)
         return payload if isinstance(payload, dict) else {}
 
-    timeout = 6.0 if remaining is None else max(1.0, min(6.0, remaining - 1.0))
-    first = _one(reviewer.pass1_model, timeout)
-    first_changes = apply_corrections(result, first)
+    run_qwen = remaining is None or remaining >= 10
+    if run_qwen:
+        timeout = 6.0 if remaining is None else max(1.0, min(6.0, remaining - 6.0))
+        first = _one(reviewer.pass1_model, timeout)
+        first_changes = apply_corrections(result, first)
     after_first = {claim.text: claim.verdict for claim in result.claims}
     remaining = None if deadline is None else deadline - time.monotonic()
-    if remaining is None or remaining >= 3:
-        timeout = 6.0 if remaining is None else max(1.0, min(6.0, remaining - 0.5))
-        second = _one(reviewer.pass2_model, timeout)
-        second_changes = apply_corrections(result, second)
-    else:
-        result.warnings = list(dict.fromkeys([*result.warnings, "review pass 2 skipped"]))
+    timeout = 6.0 if remaining is None else max(1.0, min(6.0, remaining - 0.2))
+    second = _one(reviewer.pass2_model, timeout)
+    second_changes = apply_corrections(result, second)
     disagreed = False
     for claim in result.claims:
         if claim.claim_type == "opinion" or claim.verdict == "Hypothesis":

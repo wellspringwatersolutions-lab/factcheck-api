@@ -1,0 +1,119 @@
+{
+  "adams_presidency": {
+    "claim": "John Adams was the second President of the United States (1797-1801).",
+    "context": "President John Adams, a founding father of the 18th century",
+    "passages": [
+      {
+        "url": "https://en.wikipedia.org/wiki/John_Adams",
+        "title": "John Adams",
+        "grade": "B",
+        "source_type": "encyclopedia",
+        "text": "John Adams was the second president of the United States, serving from 1797 to 1801."
+      },
+      {
+        "url": "https://www.britannica.com/biography/John-Adams-president-of-United-States",
+        "title": "John Adams",
+        "grade": "B",
+        "source_type": "encyclopedia",
+        "text": "John Adams was the second president of the United States (1797-1801)."
+      },
+      {
+        "url": "https://obamawhitehouse.archives.gov/1600/presidents/johnadams",
+        "title": "John Adams",
+        "grade": "A",
+        "source_type": "primary",
+        "text": "John Adams was the second president of the United States, in office from 1797 to 1801."
+      },
+      {
+        "url": "https://en.wikipedia.org/wiki/John_Quincy_Adams",
+        "title": "John Quincy Adams",
+        "grade": "B",
+        "source_type": "encyclopedia",
+        "text": "John Quincy Adams was the sixth president of the United States. He was the son of President John Adams."
+      }
+    ]
+  },
+  "adams_wrong_person": {
+    "claim": "John Adams was the second President of the United States (1797-1801).",
+    "context": "was john adams a criminal",
+    "passages": [
+      {
+        "url": "https://www.courtlistener.com/opinion/123/united-states-v-adams/",
+        "title": "United States v. Adams",
+        "grade": "C",
+        "source_type": "secondary",
+        "text": "John Adams pleaded guilty to sex trafficking of minors in federal court."
+      },
+      {
+        "url": "https://vlex.com/vid/state-v-adams-9001",
+        "title": "State v. Adams",
+        "grade": "C",
+        "source_type": "secondary",
+        "text": "Defendant John Adams pleaded guilty to sex trafficking of a minor."
+      },
+      {
+        "url": "https://www.wbrz.com/news/official-husband-adams/",
+        "title": "Official's husband Adams",
+        "grade": "C",
+        "source_type": "secondary",
+        "text": "A Louisiana official's husband, John Adams, was named in the local investigation."
+      }
+    ]
+  },
+  "food_debunk": {
+    "claim": "The U.S. government has not told civilians to hoard 90 days of food.",
+    "context": "",
+    "passages": [
+      {
+        "url": "https://preparedstates.com/rumor",
+        "title": "Do not stockpile on a post's say-so",
+        "grade": "C",
+        "source_type": "secondary",
+        "text": "Don't take advice from a post that says the US government has told you to stockpile 90 days of food."
+      },
+      {
+        "url": "https://todaywhy.com/food-stores",
+        "title": "No 90-day order",
+        "grade": "C",
+        "source_type": "secondary",
+        "text": "No government is asking households to hold 90 days of food."
+      },
+      {
+        "url": "https://www.rd.com/article/food-rumor",
+        "title": "The food rumor",
+        "grade": "C",
+        "source_type": "secondary",
+        "text": "You may have heard the government issued an order to hoard 90 days of food."
+      }
+    ]
+  },
+  "food_paste": {
+    "text": "The U.S. government has not told civilians to hoard 90 days of food. In October 2026 a European supermarket refrigeration cyberattack knocked freezers offline. The EU advises households to keep a 72-hour emergency kit. FEMA and ready.gov tell households to keep a 72-hour kit of food and water. Germany recommends keeping several days of shelf-stable food. Stores saw a short run on bottled water after the rumor spread."
+  },
+  "source_quality": {
+    "claim": "Germany recommends households keep food for several days.",
+    "passages": [
+      {
+        "url": "https://www.bbc.com/news/germany-food-advice",
+        "title": "Germany food advice",
+        "grade": "B",
+        "source_type": "secondary",
+        "text": "Germany recommends households keep food and water for several days."
+      },
+      {
+        "url": "https://www.tripadvisor.com/Germany",
+        "title": "Germany trip planning",
+        "grade": "E",
+        "source_type": "secondary",
+        "text": "Germany trip planning ideas for a short holiday."
+      },
+      {
+        "url": "https://prepper-blog.example/germany",
+        "title": "Prepper notes",
+        "grade": "E",
+        "source_type": "secondary",
+        "text": "A prepper blog says Germany wants extra food."
+      }
+    ]
+  }
+}

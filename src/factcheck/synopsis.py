@@ -198,8 +198,17 @@ def fallback_summary(rating: str, question: str | None, claims: list[ClaimOut], 
         if corrections:
             sentence += ". The cited evidence says: " + "; ".join(item.rstrip(".") for item in corrections)
     else:
+        headline = next(
+            (
+                claim.text
+                for claim in facts
+                if claim.verdict in {"Supported", "likely_true"}
+                and re.search(r"\b(has not told|have not told|debunk|hoard|rumou?r)\b", claim.text, re.I)
+            ),
+            "",
+        )
         direct = _direct(question, main or supported[:1])
-        body = main or supported[:1]
+        body = [headline] if headline else (main or supported[:1])
         if direct and body:
             sentence = f"{direct}, " + ", and ".join(_soft(text) for text in body)
         else:

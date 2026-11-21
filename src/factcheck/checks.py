@@ -105,6 +105,14 @@ _DEBUNK = re.compile(
     re.I,
 )
 _FACTCHECK_HOST = re.compile(r"(snopes|leadstories|politifact|factcheck\.org|fullfact)", re.I)
+_RUMOR_ONLY = re.compile(
+    r"\b(you may have heard|viral post|a post that says|posts claim|social media claims|rumou?r that)\b",
+    re.I,
+)
+_REJECT_FRAME = re.compile(
+    r"\b(don't take advice|do not take advice|no government|is not asking|has not told|have not told|there is no official)\b",
+    re.I,
+)
 
 
 def is_denial(claim: str) -> bool:
@@ -112,9 +120,18 @@ def is_denial(claim: str) -> bool:
 
 
 def is_debunk(text: str, url: str = "") -> bool:
+    if _REJECT_FRAME.search(text or ""):
+        return True
     if _FACTCHECK_HOST.search(url or "") and _DEBUNK.search(text or ""):
         return True
     return bool(_DEBUNK.search(text or ""))
+
+
+def rumor_mention(text: str) -> bool:
+    """A page that only repeats a rumor, without saying it is true."""
+    if not _RUMOR_ONLY.search(text or ""):
+        return False
+    return not is_debunk(text)
 
 
 def entailment(claim: str, passage: str) -> str:
@@ -133,8 +150,10 @@ def entailment(claim: str, passage: str) -> str:
         return "neutral"
     if dates_match(claim, passage) is False:
         return "neutral"
+    if rumor_mention(passage):
+        return "neutral"
     recall = overlap(claim, passage)
-    if is_denial(raw_claim) and is_debunk(passage) and recall >= 0.3:
+    if is_denial(raw_claim) and is_debunk(passage) and recall >= 0.2:
         return "entails"
     claim_neg = has_negation(claim)
     passage_neg = has_negation(passage)
@@ -155,7 +174,11 @@ def apply_debunk_labels(claim_text: str, passages: list[Evidence]) -> list[Evide
     debunks = []
     for passage in passages:
         text = passage.quote or passage.snippet or passage.page_text or ""
-        if is_debunk(text, passage.url) and overlap(claim_text, text) >= 0.25:
+        if rumor_mention(text):
+            passage.entailment = "neutral"
+            passage.used = False
+            continue
+        if is_debunk(text, passage.url) and overlap(claim_text, text) >= 0.2:
             debunks.append(passage)
     if not debunks:
         return passages

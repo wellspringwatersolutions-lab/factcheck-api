@@ -319,7 +319,7 @@ class VerificationService:
             else:
                 try:
                     extracted, warnings = _call_with_timeout(
-                        self.extractor.extract, 15.0, check_text, check_claims
+                        self.extractor.extract, 22.0, check_text, check_claims
                     )
                 except Exception as exc:  # noqa: BLE001 - extraction must not consume the retrieval budget
                     snippet = (check_text or "")[:240]
@@ -371,6 +371,9 @@ class VerificationService:
                 question=asked,
                 deadline=deadline,
             )
+            if deadline - time.monotonic() < 12:
+                deadline = time.monotonic() + 12
+                state.deadline = deadline
             t_review = time.monotonic()
             if self.reviewer is not None:
                 self.reviewer.meter = meter
@@ -658,7 +661,13 @@ class VerificationService:
                 hit
                 for hit in chosen
                 if not blocked_site(hit.url)
-                and not entity_mismatch(claim.text, " ".join(part for part in (hit.title, hit.snippet, hit.page_text, hit.quote) if part), context)
+                and not entity_mismatch(
+                    claim.text,
+                    " ".join(part for part in (hit.snippet, hit.page_text, hit.quote) if part),
+                    context,
+                    hit.url,
+                    hit.title,
+                )
             ]
             decision = decide(
                 chosen,

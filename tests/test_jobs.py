@@ -54,7 +54,7 @@ def test_a_slow_extractor_is_cut_off_and_retrieval_still_runs():
         started_at=started,
     )
     elapsed = time.monotonic() - started
-    assert elapsed < 20
+    assert elapsed < 30
     assert retriever.queries
     assert result.claims
     assert any(item.startswith("extraction_fallback:TimeoutError") for item in result.warnings)

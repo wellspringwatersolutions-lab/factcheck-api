@@ -160,8 +160,10 @@ def _align_draft(draft, answer: str, correction: str) -> None:
     text = (draft.text or "").strip()
     if correction and not text.lower().startswith("correction:"):
         text = f"{correction}\n\n{text}"
-    elif answer == "not_enough_evidence" and not text.lower().startswith("unconfirmed"):
-        text = f"Unconfirmed: {text}"
+    elif answer == "not_enough_evidence":
+        text = re.sub(r"(?i)^unconfirmed:\s*", "", text).strip()
+        if "evidence for this answer is thin" not in text.lower():
+            text = text.rstrip() + " The evidence for this answer is thin."
     elif answer in {"yes", "no", "partly"} and not _starts(text, answer):
         text = f"{_lead(answer)}. {text}"
     draft.text = text

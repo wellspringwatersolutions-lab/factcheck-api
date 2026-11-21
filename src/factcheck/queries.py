@@ -229,7 +229,7 @@ class QueryWriter:
             ],
             temperature=0.0,
             max_tokens=180,
-            timeout=4.0,
+            timeout=8.0,
             response_format=_QUERY_SCHEMA,
         )
         charge_tokens(

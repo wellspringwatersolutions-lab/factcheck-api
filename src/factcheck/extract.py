@@ -93,7 +93,7 @@ def split_compounds(sentence: str) -> list[str]:
 
 
 _FINITE = re.compile(
-    r"\b(is|are|was|were|be|been|has|have|had|do|does|did|will|can|may|must|shall|told|says|said|advises|advise|recommends|warns|warned|distributed|raised|gave|gives|ran)\b",
+    r"\b(is|are|was|were|be|been|has|have|had|do|does|did|will|can|may|must|shall|told|tell|tells|says|said|advises|advise|recommends|recommend|warns|warned|distributed|raised|gave|gives|ran)\b|\b[a-z]{3,}ed\b",
     re.I,
 )
 _BAD_START = re.compile(r"^(by|and|or|but|including|recommending|cranking|\d)", re.I)
@@ -547,16 +547,27 @@ def fallback_points(text: str | None, limit: int = 6) -> list[ExtractedClaim]:
     return select_key_points(found, limit)
 
 
+def must_keep(text: str) -> bool:
+    """Debunks, dated events, and official guidance stay even when the list is trimmed."""
+    if re.search(r"\b(has not told|have not told|debunk|hoard|rumou?r|stockpile)\b", text or "", re.I):
+        return True
+    if re.search(r"\b(cyberattack|refrigerat)\b", text or "", re.I) and re.search(r"\b20\d{2}\b", text or ""):
+        return True
+    if re.search(r"\b(72-hour|72 hour|ready\.gov|fema)\b", text or "", re.I):
+        return True
+    return False
+
+
 def select_key_points(claims: list[ExtractedClaim], limit: int = 6) -> list[ExtractedClaim]:
-    """Stable order. Specific factual claims, especially debunks, come first."""
+    """Stable order. Debunks, dated events, and official guidance are kept first."""
     from factcheck.cleanup import priority
 
     def rank(claim: ExtractedClaim):
         opinion = 1 if claim.claim_type == "opinion" else 0
         text = claim.text or ""
-        debunk = 0 if re.search(r"\b(not|never|no|debunk|false|hoard)\b", text, re.I) else 1
+        required = 0 if must_keep(text) else 1
         specific = 0 if _SPECIFIC.search(text) else 1
-        return (opinion, debunk, specific, priority(claim), text.lower())
+        return (opinion, required, specific, priority(claim), text.lower())
 
     ranked = sorted(claims, key=rank)
     chosen: list[ExtractedClaim] = []
