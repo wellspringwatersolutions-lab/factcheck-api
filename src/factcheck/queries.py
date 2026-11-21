@@ -9,8 +9,10 @@ from __future__ import annotations
 import calendar
 import logging
 import re
+from datetime import date, timedelta
 
 from factcheck.llm import LLMError, estimate_cost, loads_object
+from factcheck.request_ctx import charge_tokens
 
 logger = logging.getLogger("factcheck")
 
@@ -64,16 +66,25 @@ Example: France supermarket refrigeration cyberattack October 2026
 Return JSON {"queries": ["...", "..."]}"""
 
 
-def news_window(text: str) -> dict | None:
-    """Inclusive YYYY-MM-DD bounds for a month or year named in the claim.
+def _month_in_token(token: str) -> int | None:
+    """'October' and 'mid-October' both name October. A bare year does not."""
+    for piece in re.split(r"[-/]", token.lower()):
+        value = _MONTHS.get(piece)
+        if value is not None:
+            return value
+    return None
 
-    No date means no window. Callers must not send time=week in that case.
+
+def news_window(text: str) -> dict | None:
+    """Month named: that month, plus or minus about two weeks. Year only: that year.
+
+    'mid-October 2026' is October, not the whole year. No date means no window.
     """
     tokens = _TOKEN.findall(text or "")
     month = None
     year = None
     for index, token in enumerate(tokens):
-        value = _MONTHS.get(token.lower())
+        value = _month_in_token(token)
         if value is None:
             continue
         month = value
@@ -93,7 +104,9 @@ def news_window(text: str) -> dict | None:
     if month is None:
         return {"start_date": f"{year}-01-01", "end_date": f"{year}-12-31"}
     last = calendar.monthrange(year, month)[1]
-    return {"start_date": f"{year}-{month:02d}-01", "end_date": f"{year}-{month:02d}-{last:02d}"}
+    start = date(year, month, 1) - timedelta(days=14)
+    end = date(year, month, last) + timedelta(days=14)
+    return {"start_date": start.isoformat(), "end_date": end.isoformat()}
 
 
 def _content_tokens(text: str) -> list[str]:
@@ -216,8 +229,8 @@ class QueryWriter:
             timeout=4.0,
             response_format=_QUERY_SCHEMA,
         )
-        if self.meter is not None:
-            self.meter.add_tokens(
+        charge_tokens(
+            self.meter,
                 model=result.model,
                 provider=result.provider,
                 input_tokens=result.input_tokens,

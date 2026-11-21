@@ -11,6 +11,7 @@ import re
 import time
 
 from factcheck.llm import LLMError, estimate_cost, loads_object
+from factcheck.request_ctx import charge_tokens
 from factcheck.schemas import ClaimOut, SynopsisCounts, SynopsisOut
 
 _RATINGS = (
@@ -42,7 +43,7 @@ _ABSTAIN = "There wasn't enough evidence to settle this."
 _INSTRUCTION = """You phrase a veracity synopsis. You do not decide it.
 The rating is already fixed and must be the first words of summary: {rating}
 Write summary as one to three plain sentences that answer the question from the claim verdicts and cited quotes below.
-Also write tldr as one plain-English sentence of at most 30 words that opens the bottom line.
+Also write tldr as one complete sentence of at most 30 words. It must start with a capital letter, end with a period, and must not start with a comma or the word but.
 Do not add any person, place, date, number, or event that is not written in the brief.
 If the rating is "Not enough evidence", both summary and tldr must say there was not enough evidence, and must not sound confident.
 Return JSON {{"summary": "...", "tldr": "..."}}"""
@@ -203,8 +204,10 @@ def fallback_summary(rating: str, question: str | None, claims: list[ClaimOut], 
             sentence = f"{direct}, " + ", and ".join(_soft(text) for text in body)
         else:
             sentence = "; ".join(text.strip().rstrip(".") for text in body)
-        if caveat_bits:
+        if caveat_bits and sentence.strip():
             sentence = sentence.rstrip(".") + ", but " + " and ".join(caveat_bits)
+        elif caveat_bits:
+            sentence = caveat_bits[0][:1].upper() + caveat_bits[0][1:]
     sentence = sentence.rstrip(".") + "."
     tail = ""
     notes = []
@@ -266,28 +269,64 @@ def claim_counts(claims: list[ClaimOut]) -> SynopsisCounts:
     return counts
 
 
+_DANGLING = {"and", "or", "but", "the", "a", "an", "of", "to", "for", "with", "his", "her", "their"}
+
+
+def complete_sentence(text: str) -> bool:
+    """A usable bottom-line sentence, not a cut-off clause."""
+    cleaned = " ".join((text or "").split())
+    if len(cleaned) < 8 or cleaned[0] in ",;:" or not cleaned[0].isupper():
+        return False
+    if cleaned[-1] not in ".!?":
+        return False
+    words = cleaned[:-1].split()
+    if len(words) < 4 or words[-1].lower().strip(",;:") in _DANGLING:
+        return False
+    if words[0].lower() in {"but", "and", "or"}:
+        return False
+    return True
+
+
+def _template_sentence(rating: str, claims: list[ClaimOut]) -> str:
+    if rating == "Not enough evidence":
+        return _ABSTAIN
+    for claim in claims:
+        if claim.verdict not in {"Supported", "likely_true"}:
+            continue
+        sentence = claim.text.strip()
+        if sentence and sentence[-1] not in ".!?":
+            sentence += "."
+        if sentence and sentence[0].islower():
+            sentence = sentence[0].upper() + sentence[1:]
+        if complete_sentence(sentence):
+            return sentence
+    fixed = {
+        "Accurate": "The checked claims are accurate.",
+        "Mostly accurate": "The checked claims are mostly accurate.",
+        "Mixed": "The checked claims are mixed.",
+        "Mostly inaccurate": "The checked claims are mostly inaccurate.",
+        "Inaccurate": "The checked claims are inaccurate.",
+    }
+    return fixed.get(rating, _ABSTAIN)
+
+
 def _word_count(text: str) -> int:
     return len(re.findall(r"\b[\w']+\b", text or ""))
 
 
-def fallback_tldr(rating: str, summary: str) -> str:
-    """One sentence. Not enough evidence uses a fixed line. Otherwise the first content sentence."""
+def fallback_tldr(rating: str, summary: str, claims: list[ClaimOut] | None = None) -> str:
+    """One whole sentence. A fragment is replaced with a template."""
     if rating == "Not enough evidence":
         return _ABSTAIN
     parts = [part.strip() for part in re.split(r"(?<=[.!?])\s+", summary or "") if part.strip()]
-    chosen = ""
     for part in parts:
-        if part.rstrip(".").lower() != rating.lower():
-            chosen = part
-            break
-    if not chosen and parts:
-        chosen = parts[0]
-    words = chosen.split()
-    if len(words) > 30:
-        chosen = " ".join(words[:30]).rstrip(",;:")
-    if chosen and chosen[-1] not in ".!?":
-        chosen += "."
-    return chosen or _ABSTAIN
+        if part.rstrip(".").lower() == rating.lower():
+            continue
+        if _word_count(part) > 30:
+            continue
+        if complete_sentence(part):
+            return part
+    return _template_sentence(rating, claims or [])
 
 
 def grounded(summary: str, corpus: str) -> bool:
@@ -314,7 +353,7 @@ def _says_not_enough(text: str) -> bool:
 
 def _accept_tldr(text: str, corpus: str, rating: str) -> bool:
     cleaned = (text or "").strip()
-    if not cleaned or _word_count(cleaned) > 30:
+    if not complete_sentence(cleaned) or _word_count(cleaned) > 30:
         return False
     allowed = corpus
     if rating == "Not enough evidence":
@@ -333,7 +372,7 @@ def build_synopsis(
 ) -> SynopsisOut:
     rating, caveats, unchecked_count = rate_claims(claims)
     summary = fallback_summary(rating, question, claims, caveats, unchecked_count)
-    tldr = fallback_tldr(rating, summary)
+    tldr = fallback_tldr(rating, summary, claims)
     counts = claim_counts(claims)
     # A contradiction is stated from the cited quote. Do not let a phrasing call rewrite it.
     contradicted = any(claim.verdict == "Contradicted" for claim in claims)
@@ -347,13 +386,11 @@ def build_synopsis(
         summary_text, tldr_text = _phrased_parts(phrased)
         if summary_text and grounded(summary_text, brief):
             cleaned = summary_text.strip()
-            if not cleaned.lower().startswith(rating.lower()):
-                cleaned = f"{rating}. {cleaned}"
-            summary = cleaned
+            body = cleaned[len(rating):].lstrip(" .") if cleaned.lower().startswith(rating.lower()) else cleaned
+            if complete_sentence(body):
+                summary = cleaned if cleaned.lower().startswith(rating.lower()) else f"{rating}. {body}"
         if tldr_text and _accept_tldr(tldr_text, brief, rating):
             tldr = tldr_text.strip()
-            if tldr[-1] not in ".!?":
-                tldr += "."
     from factcheck.reconcile import answer_for_rating
 
     supported_texts = [claim.text for claim in claims if claim.verdict == "Supported"]
@@ -415,8 +452,8 @@ class LLMSynopsis:
             )
         except (LLMError, Exception):  # noqa: BLE001
             return None
-        if self.meter is not None:
-            self.meter.add_tokens(
+        charge_tokens(
+            self.meter,
                 model=result.model,
                 provider=result.provider,
                 input_tokens=result.input_tokens,

@@ -67,6 +67,7 @@ def to_check_report(result: VerificationOut, input_text: str) -> dict:
                     "title": source.title,
                     "domain": hostname(source.url),
                     "checked_on": _checked_on(source.published_at),
+                    "published_date": source.published_at,
                     "quote": source.quote or source.snippet,
                     "source_type": _source_type(source.source_type, source.url),
                 }

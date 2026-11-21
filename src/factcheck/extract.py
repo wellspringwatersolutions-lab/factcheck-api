@@ -12,11 +12,12 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError, as_completed
 
 from factcheck.cleanup import chunk_paragraphs, clean_claim_text, prepare_answer
 from factcheck.llm import LLMError, estimate_cost, loads_object
+from factcheck.request_ctx import bind_context, charge_tokens
 from factcheck.textutil import is_time_sensitive, split_sentences
 from factcheck.types import ExtractedClaim, UsageMeter
 
 logger = logging.getLogger("factcheck")
-_EXTRACT_BUDGET = 12.0
+_EXTRACT_BUDGET = 15.0
 
 _PRONOUN = re.compile(r"\b(He|She|They|It|This|That)\b(?!')")
 _FILLER_ONLY = re.compile(r"^(of course|that said|well|anyway|look)[.!]?$", re.I)
@@ -40,11 +41,39 @@ class Sentence:
     context: str
 
 
+_CLAUSE_VERB = re.compile(
+    r"\b(is|are|was|were|be|been|has|have|had|do|does|did|will|can|may|must|shall)\b|\b[a-z]{4,}(?:ed|ing)\b",
+    re.I,
+)
+
+
+def _is_clause(text: str) -> bool:
+    words = text.split()
+    return len(words) >= 5 and bool(_CLAUSE_VERB.search(text))
+
+
+def split_compounds(sentence: str) -> list[str]:
+    """Split on semicolons, and on 'and' only when both sides are clauses."""
+    pieces: list[str] = []
+    for chunk in re.split(r";\s*", sentence or ""):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        parts = [part.strip() for part in re.split(r"\s+\band\b\s+", chunk, flags=re.I) if part.strip()]
+        if len(parts) >= 2 and all(_is_clause(part) for part in parts):
+            pieces.extend(parts)
+        else:
+            pieces.append(chunk)
+    return pieces or ([sentence.strip()] if sentence and sentence.strip() else [])
+
+
 def build_sentences(text: str | None, claims: list[str] | None) -> list[Sentence]:
     if claims:
         context = " ".join((text or "").split())[:500]
         return [Sentence(i, claim.strip(), context) for i, claim in enumerate(claims) if claim and claim.strip()]
-    parts = split_sentences(text or "")
+    parts: list[str] = []
+    for sentence in split_sentences(text or ""):
+        parts.extend(split_compounds(sentence))
     sentences = []
     for index, part in enumerate(parts):
         window = " ".join(parts[max(0, index - 1) : index + 2])
@@ -209,7 +238,8 @@ Do not change fact into opinion or the reverse.
 Preserve attribution.
 Return JSON {"sentences": [{"id": 0, "text": "...", "drop": false, "claim_type": "fact|opinion", "attribution": null}]}"""
 
-_DECOMPOSE = """Pick the 4 most important checkable key points in this passage. Never return more than 4.
+_DECOMPOSE = """Pick up to 6 checkable key points. Use the same points for the same text.
+Prefer specific claims: named programs, numbers, dates, and official guidance. Drop vague wrap-up lines.
 Skip the user's question, headings, and meta commentary such as "breaks down into".
 Each point is one checkable claim. span is a verbatim sentence copied from the passage.
 Attributed claims must say who said it.
@@ -299,7 +329,8 @@ class LiveExtractor:
             ],
             temperature=0.0,
         )
-        self.meter.add_tokens(
+        charge_tokens(
+            self.meter,
             model=result.model,
             provider=result.provider,
             input_tokens=result.input_tokens,
@@ -320,7 +351,8 @@ class LiveExtractor:
                 ],
                 temperature=0.0,
             )
-            self.meter.add_tokens(
+            charge_tokens(
+            self.meter,
                 model=retry.model,
                 provider=retry.provider,
                 input_tokens=retry.input_tokens,
@@ -351,10 +383,11 @@ class LiveExtractor:
             ],
             temperature=0.0,
             max_tokens=700,
-            timeout=8.0,
+            timeout=15.0,
             response_format=_CLAIM_SCHEMA,
         )
-        self.meter.add_tokens(
+        charge_tokens(
+            self.meter,
             model=result.model,
             provider=result.provider,
             input_tokens=result.input_tokens,
@@ -378,7 +411,7 @@ class LiveExtractor:
         found: list[ExtractedClaim] = []
         warnings: list[str] = []
         pool = ThreadPoolExecutor(max_workers=min(4, len(chunks)))
-        futures = {pool.submit(self._one_chunk, chunk): chunk for chunk in chunks}
+        futures = {pool.submit(bind_context(self._one_chunk, chunk)): chunk for chunk in chunks}
         pending = set(futures)
         try:
             try:
@@ -417,11 +450,23 @@ class LiveExtractor:
         return select_key_points(unique, 6), warnings
 
 
+_SPECIFIC = re.compile(
+    r"\d|\b(19|20)\d{2}\b|\b(january|february|march|april|may|june|july|august|september|october|november|december|"
+    r"guidance|official|program|ready\.gov|europa|act|order)\b",
+    re.I,
+)
+
+
 def select_key_points(claims: list[ExtractedClaim], limit: int = 6) -> list[ExtractedClaim]:
-    """The claims worth a full retrieval pass. Questions and fragments are already dropped."""
+    """Stable order. Specific factual claims come before vague ones."""
     from factcheck.cleanup import priority
 
-    ranked = sorted(claims, key=lambda claim: priority(claim))
+    def rank(claim: ExtractedClaim):
+        opinion = 1 if claim.claim_type == "opinion" else 0
+        specific = 0 if _SPECIFIC.search(claim.text or "") else 1
+        return (opinion, specific, priority(claim), claim.text.lower())
+
+    ranked = sorted(claims, key=rank)
     chosen: list[ExtractedClaim] = []
     seen: set[str] = set()
     for claim in ranked:

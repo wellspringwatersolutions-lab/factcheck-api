@@ -10,6 +10,7 @@ import httpx
 
 logger = logging.getLogger("factcheck")
 
+from factcheck.request_ctx import bind_context, note_retrieval
 from factcheck.types import Evidence
 
 _DATE = re.compile(r"(20\d{2}-\d{2}-\d{2})")
@@ -45,6 +46,7 @@ class DesearchRetriever:
             params["start_date"] = window["start_date"]
             params["end_date"] = window["end_date"]
         self.retrieval_calls += 1
+        note_retrieval(1)
         response = self.client.get(f"{self.base_url}{path}", params=params, headers=self._headers())
         response.raise_for_status()
         payload = response.json()
@@ -66,23 +68,61 @@ class DesearchRetriever:
         return [hit for hit in hits if hit.url]
 
     def search(self, query: str, *, limit: int = 6) -> list[Evidence]:
-        """Web results only. Fact-check search uses search_web_and_news."""
+        """Keyword web results. Dated search uses POST /search."""
         return self._rows("/web", query, limit, None)
 
+    def _post_search(self, query: str, limit: int, window: dict | None) -> list[Evidence]:
+        """POST /search. GET /news is gone and returns 404."""
+        count = 10 if limit <= 10 else 15 if limit <= 15 else 20
+        body: dict = {"query": query, "count": count, "highlights": True}
+        if window:
+            body["start_date"] = window["start_date"]
+            body["end_date"] = window["end_date"]
+        self.retrieval_calls += 1
+        note_retrieval(1)
+        response = self.client.post(f"{self.base_url}/search", json=body, headers=self._headers())
+        response.raise_for_status()
+        payload = response.json()
+        header_cost = _cost_header(response)
+        body_cost = float(payload.get("cost_usd") or 0) if isinstance(payload, dict) else 0.0
+        self.cost_usd += header_cost or body_cost
+        rows = payload.get("results") or [] if isinstance(payload, dict) else []
+        hits = []
+        for row in rows[:limit]:
+            highlights = row.get("highlights") or []
+            if isinstance(highlights, list):
+                snippet = " ".join(str(item) for item in highlights if item)
+            else:
+                snippet = str(highlights or row.get("snippet") or "")
+            hits.append(
+                Evidence(
+                    url=row.get("url") or "",
+                    title=row.get("title") or "",
+                    snippet=snippet,
+                    published_at=row.get("published_date") or row.get("published_at"),
+                    provider="desearch",
+                )
+            )
+        return [hit for hit in hits if hit.url]
+
     def search_web_and_news(self, queries: list[str], *, limit: int = 6, window: dict | None = None) -> list[Evidence]:
-        """Each keyword query is run on /web and /news. News is not limited to the past week."""
+        """Keyword results from GET /web and dated results from POST /search. Never GET /news."""
         hits: list[Evidence] = []
         seen: set[str] = set()
         for query in queries:
             cleaned = " ".join((query or "").split())
             if not cleaned:
                 continue
-            for path in ("/web", "/news"):
-                try:
-                    batch = self._rows(path, cleaned, limit, window if path == "/news" else None)
-                except Exception as exc:  # noqa: BLE001 - one channel failing must not drop the other
-                    logger.warning("desearch %s failed: %s", path, exc.__class__.__name__)
-                    continue
+            batches = []
+            try:
+                batches.append(self._rows("/web", cleaned, limit, None))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("desearch /web failed: %s", exc.__class__.__name__)
+            try:
+                batches.append(self._post_search(cleaned, limit, window))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("desearch /search failed: %s", exc.__class__.__name__)
+            for batch in batches:
                 for hit in batch:
                     key = hit.url.split("#")[0].rstrip("/")
                     if key in seen:
@@ -186,7 +226,7 @@ class CompositeRetriever:
         if not jobs:
             return []
         with ThreadPoolExecutor(max_workers=min(4, len(jobs))) as pool:
-            futures = [pool.submit(job) for job in jobs]
+            futures = [pool.submit(bind_context(job)) for job in jobs]
             try:
                 for future in as_completed(futures, timeout=self.timeout):
                     try:

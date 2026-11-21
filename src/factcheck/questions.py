@@ -6,6 +6,7 @@ The draft is never a source. Verdicts still require a retrieved passage or a too
 from __future__ import annotations
 
 from factcheck.llm import estimate_cost
+from factcheck.request_ctx import charge_tokens
 from factcheck.textutil import parse_json_object
 
 _DRAFT = """Answer the question in two to four factual sentences.
@@ -78,8 +79,8 @@ class AnswerDrafter:
             max_tokens=400,
             timeout=8.0,
         )
-        if self.meter is not None:
-            self.meter.add_tokens(
+        charge_tokens(
+            self.meter,
                 model=result.model,
                 provider=result.provider,
                 input_tokens=result.input_tokens,

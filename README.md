@@ -73,9 +73,9 @@ python -m factcheck.cli serve --port 8741
 
 With no API keys the service still runs. Math is recomputed locally. Fact claims come back Unverified until a retriever can fetch a page. SQLite (`./data/factcheck.db`) and an in-memory cache are the defaults, so Postgres and Redis are optional.
 
-A pasted answer is condensed to the 4–6 most important checkable key points. The user's question, when one is pasted above the answer, is context and is not a claim. Each key point gets 2–3 keyword search queries (Qwen, then DeepSeek if that call fails). Those queries run on Desearch web and Desearch news. A month or year in the claim sets the news window; otherwise news is not date-limited. The window is never the past week by default.
+A pasted answer is condensed to the 4–6 most important checkable key points, with specific claims (numbers, dates, official guidance) first. The user's question, when one is pasted above the answer, is context and is not a claim. Each key point gets 2–3 keyword search queries (Qwen, then DeepSeek if that call fails). Those queries run on Desearch `GET /web` and `POST /search`. A named month searches that month plus or minus about two weeks (`mid-October 2026` is October, not the whole year). A year with no month searches that year. No date means no date filter. `GET /news` is not used.
 
-A normal check aims to finish within about 45 seconds, including the two-pass review. A pasted answer longer than 3,500 characters is allowed 75 seconds. An async job gets 120 seconds, split so each key point is retrieved and judged and the review still runs. The clock starts after the request body is parsed. Extraction is capped at 12 seconds. Retrieval keeps at least 25 seconds and the review keeps 16 seconds.
+A normal check aims to finish within about 45 seconds, including the two-pass review. A pasted answer longer than 3,500 characters is allowed 75 seconds. An async job gets 120 seconds, split so each key point is retrieved and judged and the review still runs. The clock starts after the request body is parsed. Extraction is capped at 15 seconds. Retrieval keeps at least 25 seconds and the review keeps 16 seconds. Usage, retrieval counts, and phase timers belong to the request, not the process.
 
 `scripts/regress.py` prints per-claim verdicts and the bottom line from a live API. It is not part of the test run.
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 from factcheck.checks import best_passages, entailment, quote_appears, quantity_conflict, split_passages
 from factcheck.llm import loads_object
 from factcheck.textutil import overlap
+from factcheck.request_ctx import charge_tokens
 from factcheck.types import Evidence, ExtractedClaim, JudgeVote, UsageMeter
 
 _PROMPT = """STAGE: entailment
@@ -15,6 +16,8 @@ A paraphrase can support the claim when the passage states the same fact in othe
 quote must still be copied verbatim from that passage or its search snippet. If you cannot quote it, use NOT_ENOUGH_INFO and an empty quote.
 If the page body is missing, the search snippet is the passage.
 Ignore HTML, scripts, and boilerplate. A negation in an unrelated sentence is not a refutation.
+A source that debunks a rumor SUPPORTS a claim denying that rumor. Snopes or Lead Stories rating the story False supports "has not" or "did not".
+A page that only repeats the rumor is NOT_ENOUGH_INFO when a fact-checker has debunked it. It is not a refutation of the denial.
 Return JSON {"passages": [{"url": "...", "label": "SUPPORTS|REFUTES|NOT_ENOUGH_INFO", "quote": "verbatim words"}]}"""
 
 _LABELS = {
@@ -131,14 +134,14 @@ class HeuristicRanker:
         self.family = model.split("/")[0]
 
     def rank(self, claims: list[ExtractedClaim], passages: list[Evidence]) -> list[JudgeVote]:
-        if self.meter:
-            self.meter.add_tokens(
-                model=self.model,
-                provider="heuristic",
-                input_tokens=120,
-                output_tokens=40,
-                cost=0.00002,
-            )
+        charge_tokens(
+            self.meter,
+            model=self.model,
+            provider="heuristic",
+            input_tokens=120,
+            output_tokens=40,
+            cost=0.00002,
+        )
         votes = []
         for claim in claims:
             stances = {}
@@ -190,7 +193,8 @@ class LiveRanker:
             messages=[{"role": "system", "content": _PROMPT}, {"role": "user", "content": "\n".join(lines)}],
             temperature=0.0,
         )
-        self.meter.add_tokens(
+        charge_tokens(
+            self.meter,
             model=result.model,
             provider=result.provider,
             input_tokens=result.input_tokens,

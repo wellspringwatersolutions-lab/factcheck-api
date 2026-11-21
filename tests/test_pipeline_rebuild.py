@@ -1,9 +1,13 @@
+import json
+import threading
+
 import httpx
 
 from factcheck.aggregate import decide
+from factcheck.checks import apply_debunk_labels
 from factcheck.credibility import grade_for
-from factcheck.extract import select_key_points
-from factcheck.extract import heuristic_extract
+from factcheck.extract import heuristic_extract, select_key_points, split_compounds
+from factcheck.synopsis import complete_sentence, fallback_tldr
 from factcheck.queries import heuristic_queries, news_window
 from factcheck.retrievers import DesearchRetriever
 from factcheck.review import TwoPassReview, run_review
@@ -15,9 +19,14 @@ from tests.test_review import _result, _reviewer
 
 
 def test_news_window_follows_the_claim_and_queries_are_keywords():
-    assert news_window("In October 2026 France saw a supermarket refrigeration cyberattack.") == {
-        "start_date": "2026-10-01",
-        "end_date": "2026-10-31",
+    october = news_window("In October 2026 France saw a supermarket refrigeration cyberattack.")
+    assert october["start_date"] == "2026-09-17"
+    assert october["end_date"] == "2026-11-14"
+    mid = news_window("Stockpiling guidance from mid-October 2026 told households to keep a kit.")
+    assert mid == october
+    assert news_window("A report from 2024 described the same program.") == {
+        "start_date": "2024-01-01",
+        "end_date": "2024-12-31",
     }
     assert news_window("The Pentagon gave commanders 90 days to harden bases.") is None
     queries = heuristic_queries("In October 2026 France reported a European supermarket refrigeration cyberattack.")
@@ -30,29 +39,44 @@ def test_news_window_follows_the_claim_and_queries_are_keywords():
     assert all(len(query.split()) <= 10 for query in queries)
 
 
-def test_desearch_runs_web_and_news_without_a_week_window():
+def test_desearch_runs_web_and_post_search_without_a_week_window():
     seen = []
 
     def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            body = json.loads(request.content.decode())
+            seen.append((request.url.path, body))
+            return httpx.Response(
+                200,
+                json={
+                    "results": [
+                        {
+                            "url": "https://www.reuters.com/france",
+                            "title": "France hack",
+                            "highlights": ["French supermarkets lost refrigeration."],
+                            "published_date": "2026-10-12",
+                        }
+                    ]
+                },
+            )
         seen.append((request.url.path, dict(request.url.params)))
         return httpx.Response(
             200,
-            json={"data": [{"link": f"https://example.com/{request.url.path.strip('/')}", "title": "Story", "snippet": "French supermarkets lost refrigeration."}]},
+            json={"data": [{"link": "https://example.com/web", "title": "Story", "snippet": "French supermarkets lost refrigeration."}]},
         )
 
     retriever = DesearchRetriever("k", client=httpx.Client(transport=httpx.MockTransport(handler)))
     hits = retriever.search_web_and_news(
-        ["France supermarket refrigeration October 2026", "France cyberattack refrigeration"],
+        ["France supermarket refrigeration October 2026"],
         window=news_window("In October 2026 France saw a supermarket refrigeration cyberattack."),
     )
-    paths = [path for path, _params in seen]
-    assert paths.count("/web") == 2
-    assert paths.count("/news") == 2
-    news = [params for path, params in seen if path == "/news"]
-    assert all(params["start_date"] == "2026-10-01" and params["end_date"] == "2026-10-31" for params in news)
-    assert all("time" not in params for _path, params in seen)
-    assert len(hits) == 2
-    assert retriever.retrieval_calls == 4
+    assert not any(path == "/news" for path, _payload in seen)
+    posted = [body for path, body in seen if path == "/search"]
+    assert posted and posted[0]["start_date"] == "2026-09-17" and posted[0]["end_date"] == "2026-11-14"
+    assert "time" not in posted[0]
+    dated = next(hit for hit in hits if hit.published_at == "2026-10-12")
+    assert dated.url == "https://www.reuters.com/france"
+    assert "refrigeration" in dated.snippet
 
 
 def test_one_reputable_source_is_likely_true_and_two_still_support():
@@ -132,3 +156,128 @@ def test_a_failed_review_pass_still_fills_the_review_field():
     assert "changes" in body["review"]
     unused = TwoPassReview
     assert unused is not None
+
+
+def test_a_debunk_supports_a_denial_and_a_rumor_echo_is_not_a_conflict():
+    claim = "The U.S. government has not told civilians to hoard 90 days of food."
+    snopes = Evidence(
+        url="https://www.snopes.com/fact-check/food-hoard",
+        title="Snopes",
+        snippet="Snopes rating: False. The rumor that the government told civilians to hoard 90 days of food is false.",
+        page_text="Snopes rating: False. The rumor that the government told civilians to hoard 90 days of food is false.",
+        source_type="fact_checker",
+        grade="B",
+        origin_id="snopes.com",
+        entailment="contradicts",
+        used=True,
+        quote="The rumor that the government told civilians to hoard 90 days of food is false.",
+    )
+    echo = Evidence(
+        url="https://random-shop.example/rumor",
+        title="Rumor",
+        snippet="The government told civilians to hoard 90 days of food before the outage.",
+        page_text="The government told civilians to hoard 90 days of food before the outage.",
+        quote="The government told civilians to hoard 90 days of food before the outage.",
+        grade="E",
+        source_type="secondary",
+        origin_id="random-shop.example",
+        entailment="contradicts",
+        used=True,
+    )
+    apply_debunk_labels(claim, [snopes, echo])
+    assert snopes.entailment == "entails"
+    assert echo.entailment != "contradicts"
+    decision = decide([snopes, echo], category="T6", claim_text=claim)
+    assert decision.verdict != "Conflicting"
+    assert decision.verdict in {"likely_true", "Supported"}
+
+
+def test_three_lower_tier_sources_or_one_official_page_are_likely_true():
+    quote = "The European guidance asks households to keep supplies for at least 72 hours."
+    pages = []
+    for index, host in enumerate(("news-a.example", "news-b.example", "news-c.example", "news-d.example")):
+        pages.append(
+            Evidence(
+                url=f"https://{host}/kit",
+                title="72 hour kit",
+                snippet=quote,
+                page_text=quote,
+                quote=quote,
+                entailment="entails",
+                used=True,
+                grade="C",
+                source_type="secondary",
+                origin_id=host,
+            )
+        )
+    assert decide(pages, category="T6", claim_text="Households were told to keep a 72 hour emergency kit.").verdict == "likely_true"
+    official = Evidence(
+        url="https://www.ready.gov/kit",
+        title="Ready.gov",
+        snippet="Build a kit with supplies for several days, including water and food.",
+        page_text="Build a kit with supplies for several days, including water and food.",
+        grade="A",
+        source_type="primary",
+        origin_id="ready.gov",
+    )
+    assert decide([official], category="T6", claim_text="Official guidance says households should build a kit with water and food.").verdict == "likely_true"
+
+
+def test_compound_fallback_splits_clauses_and_fragments_are_rejected():
+    parts = split_compounds(
+        "The council raised property taxes in 2019; the mayor opposed the increase and neighbors complained."
+    )
+    assert any("council raised" in part for part in parts)
+    assert any("mayor opposed" in part for part in parts)
+    both = split_compounds("The council raised property taxes in 2019 and the mayor opposed that increase in public.")
+    assert len(both) == 2
+    assert split_compounds("Research and development spending rose in 2019 after the vote.") == [
+        "Research and development spending rose in 2019 after the vote."
+    ]
+    assert not complete_sentence(", but the U.S.")
+    assert not complete_sentence("His presidency and.")
+    assert complete_sentence("The checked claims are mostly accurate.")
+    assert fallback_tldr("Mostly accurate", "Mostly accurate. , but the U.S.").startswith("The checked")
+
+
+def test_concurrent_checks_do_not_share_usage():
+    from factcheck.request_ctx import active_meter
+    from tests.conftest import RecordingRetriever
+
+    class Charging(RecordingRetriever):
+        def search(self, query, *, limit=6, scientific=False, categories=None, extra_queries=None, window=None, broad=False):
+            found = super().search(
+                query,
+                limit=limit,
+                scientific=scientific,
+                categories=categories,
+                extra_queries=extra_queries,
+                window=window,
+                broad=broad,
+            )
+            meter = active_meter(None)
+            if meter is not None:
+                meter.add_tokens(model="m", provider="p", input_tokens=10, output_tokens=1, cost=0.01)
+            return found
+
+    page = "The council raised property taxes in 2019 after a long public debate."
+    service, _, _, _ = make_service(
+        retriever=Charging([Evidence(url="https://www.reuters.com/taxes", title="Taxes", snippet=page, page_text=page, grade="B")]),
+    )
+
+    def run(text, fingerprint, box):
+        box.append(service.verify(text=text, claims=None, client=client(fingerprint=fingerprint), charge=False))
+
+    first: list = []
+    second: list = []
+    left = threading.Thread(target=run, args=("The council raised property taxes in 2019 after a long debate.", "one", first))
+    right = threading.Thread(target=run, args=("Canberra is the capital city of Australia and has been since 1913.", "two", second))
+    left.start()
+    right.start()
+    left.join()
+    right.join()
+    assert first[0].usage.retrieval_calls >= 1
+    assert second[0].usage.retrieval_calls >= 1
+    assert first[0].usage.input_tokens == 10
+    assert second[0].usage.input_tokens == 10
+    assert first[0].verification_id != second[0].verification_id

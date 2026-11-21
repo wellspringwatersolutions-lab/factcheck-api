@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 
 from factcheck.checks import quote_exact
+from factcheck.request_ctx import charge_tokens
 from factcheck.llm import LLMError, estimate_cost, loads_object
 from factcheck.schemas import ReviewChange, ReviewOut, VerificationOut
 from factcheck.synopsis import (
@@ -154,8 +155,8 @@ def _ask(reviewer, model: str, result: VerificationOut, timeout: float) -> dict:
         max_tokens=500,
         timeout=timeout,
     )
-    if reviewer.meter is not None:
-        reviewer.meter.add_tokens(
+    charge_tokens(
+        reviewer.meter,
             model=response.model,
             provider=response.provider,
             input_tokens=response.input_tokens,

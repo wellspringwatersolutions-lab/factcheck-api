@@ -157,6 +157,46 @@ def _reputable(passage: Evidence) -> bool:
     return True
 
 
+def _primary_source(passage: Evidence) -> bool:
+    """An official page can carry likely_true on its own."""
+    host = hostname(passage.url)
+    if host.endswith(".gov") or host.endswith(".gov.uk") or host.endswith(".gouv.fr") or host.endswith(".gc.ca"):
+        return True
+    if host == "europa.eu" or host.endswith(".europa.eu"):
+        return True
+    if host == "ready.gov" or host.endswith(".ready.gov"):
+        return True
+    return passage.source_type in {"primary", "primary_source"} and passage.grade in {"A", "B"}
+
+
+def _agrees(claim_text: str, passage: Evidence) -> bool:
+    text = (passage.quote or passage.snippet or passage.page_text or "").strip()
+    if len(text) < 40 or _DATELINE.match(text) or passage.entailment == "contradicts":
+        return False
+    if passage.entailment == "entails":
+        return True
+    from factcheck.textutil import overlap
+
+    return overlap(claim_text, text) >= 0.35
+
+
+def _independent_agreements(claim_text: str, passages: list[Evidence]) -> list[Evidence]:
+    """Lower-tier pages that say the same thing. Three independent origins are enough."""
+    chosen: dict[str, Evidence] = {}
+    for passage in passages:
+        if passage.source_type in {"anecdote", "eyewitness", "syndicated"}:
+            continue
+        if passage.grade == "E" and passage.entailment != "entails":
+            continue
+        if not _agrees(claim_text, passage):
+            continue
+        origin = passage.origin_id or hostname(passage.url)
+        if not origin or origin in chosen:
+            continue
+        chosen[origin] = passage
+    return list(chosen.values())
+
+
 def _backs_substance(claim_text: str, passage: Evidence) -> bool:
     if not _reputable(passage):
         return False
@@ -314,6 +354,31 @@ def decide(
             )
 
     if not supporting and not contradicting:
+        primaries = [item for item in passages if _primary_source(item) and _agrees(claim_text, item)]
+        if primaries:
+            _mark_likely(primaries[:1])
+            return Decision(
+                verdict="likely_true",
+                strength_of_support=0.6,
+                reasoning=(
+                    "Likely true. One official source backs the substance of the claim. " + STRENGTH_NOTE
+                ),
+                needs_human_review=high_stakes,
+                supporting_quotes=[item.quote for item in primaries if item.quote][:1],
+            )
+        group = _independent_agreements(claim_text, passages)
+        if len(group) >= 3:
+            _mark_likely(group[:3])
+            return Decision(
+                verdict="likely_true",
+                strength_of_support=0.56,
+                reasoning=(
+                    f"Likely true. {len(group)} independent sources agree on the substance of the claim. "
+                    + STRENGTH_NOTE
+                ),
+                needs_human_review=high_stakes,
+                supporting_quotes=[item.quote for item in group if item.quote][:3],
+            )
         backers = [item for item in passages if _backs_substance(claim_text, item)]
         if backers:
             _mark_likely(backers[:2])
@@ -406,6 +471,28 @@ def decide(
                 ),
                 needs_human_review=high_stakes,
                 supporting_quotes=[item.quote for item in reputable if item.quote][:2],
+            )
+        primaries = [item for item in supporting if _primary_source(item)]
+        if primaries:
+            return Decision(
+                verdict="likely_true",
+                strength_of_support=0.6,
+                reasoning="Likely true. One official source quotes a passage that lines up with the claim. " + STRENGTH_NOTE,
+                needs_human_review=high_stakes,
+                supporting_quotes=[item.quote for item in primaries if item.quote][:1],
+            )
+        origins = {item.origin_id or hostname(item.url) for item in supporting}
+        origins.discard("")
+        if len(origins) >= 3:
+            return Decision(
+                verdict="likely_true",
+                strength_of_support=0.56,
+                reasoning=(
+                    f"Likely true. {len(origins)} independent sources quote passages that line up with the claim. "
+                    + STRENGTH_NOTE
+                ),
+                needs_human_review=high_stakes,
+                supporting_quotes=support_quotes[:3],
             )
         return Decision(
             verdict="Unverified",

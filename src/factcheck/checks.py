@@ -98,12 +98,32 @@ def _with_synonyms(text: str) -> str:
     return " ".join(extra)
 
 
+_DENIAL = re.compile(r"\b(not|never|no|n't|without)\b", re.I)
+_DEBUNK = re.compile(
+    r"\b(debunk(?:ed|s|ing)?|false|misleading|no evidence|not true|unproven|pants on fire|"
+    r"rumou?r is|rating:\s*false|did not|has not|have not|never told|hoax)\b",
+    re.I,
+)
+_FACTCHECK_HOST = re.compile(r"(snopes|leadstories|politifact|factcheck\.org|fullfact)", re.I)
+
+
+def is_denial(claim: str) -> bool:
+    return bool(_DENIAL.search(claim or ""))
+
+
+def is_debunk(text: str, url: str = "") -> bool:
+    if _FACTCHECK_HOST.search(url or "") and _DEBUNK.search(text or ""):
+        return True
+    return bool(_DEBUNK.search(text or ""))
+
+
 def entailment(claim: str, passage: str) -> str:
-    """Offline sentence check. Negation is read only inside this passage, never the whole page."""
+    """Offline sentence check. A debunk supports a claim that denies the rumor."""
     if not passage or not passage.strip():
         return "neutral"
     if "<" in passage and ">" in passage:
         passage = clean_html(passage)
+    raw_claim = claim
     claim = _with_synonyms(claim)
     passage = _with_synonyms(passage)
     conflict = quantity_conflict(claim, passage)
@@ -114,6 +134,8 @@ def entailment(claim: str, passage: str) -> str:
     if dates_match(claim, passage) is False:
         return "neutral"
     recall = overlap(claim, passage)
+    if is_denial(raw_claim) and is_debunk(passage) and recall >= 0.3:
+        return "entails"
     claim_neg = has_negation(claim)
     passage_neg = has_negation(passage)
     if recall >= 0.45 and claim_neg == passage_neg:
@@ -121,6 +143,36 @@ def entailment(claim: str, passage: str) -> str:
     if recall >= 0.45 and claim_neg != passage_neg:
         return "contradicts"
     return "neutral"
+
+
+def apply_debunk_labels(claim_text: str, passages: list[Evidence]) -> list[Evidence]:
+    """A fact-check that debunks a rumor supports a claim denying that rumor.
+
+    Pages that only repeat the rumor are not contradictions once a debunk is in the set.
+    """
+    if not is_denial(claim_text):
+        return passages
+    debunks = []
+    for passage in passages:
+        text = passage.quote or passage.snippet or passage.page_text or ""
+        if is_debunk(text, passage.url) and overlap(claim_text, text) >= 0.25:
+            debunks.append(passage)
+    if not debunks:
+        return passages
+    for passage in debunks:
+        passage.entailment = "entails"
+        passage.used = True
+        if not passage.quote:
+            passage.quote = (passage.snippet or passage.page_text or "")[:400]
+    for passage in passages:
+        if passage in debunks or passage.entailment != "contradicts":
+            continue
+        text = passage.quote or passage.snippet or passage.page_text or ""
+        if is_debunk(text, passage.url):
+            continue
+        passage.entailment = "neutral"
+        passage.used = False
+    return passages
 
 
 def best_passage(page: str, claim: str, limit: int = 420) -> str:

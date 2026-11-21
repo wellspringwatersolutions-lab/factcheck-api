@@ -14,10 +14,20 @@ from uuid import uuid4
 
 from factcheck.aggregate import RULES_VERSION, decide
 from factcheck.categories import CATEGORIES, EFFORT_LIMITS, effort_for, normalize_claim
-from factcheck.checks import UrlChecker, apply_passage_checks, passage_check_rows
+from factcheck.checks import UrlChecker, apply_debunk_labels, apply_passage_checks, passage_check_rows
 from factcheck.cleanup import focus_query, is_bare_question, peel_leading_question, priority, split_dialogue
 from factcheck.extract import heuristic_extract, select_key_points
 from factcheck.queries import heuristic_queries, news_window
+from factcheck.request_ctx import (
+    add_phase,
+    begin_request,
+    bind_context,
+    current_request,
+    end_request,
+    phase_seconds,
+    retrieval_calls,
+    set_phase,
+)
 from factcheck.compute import recompute
 from factcheck.credibility import annotate, dedupe_syndicated, dedupe_urls, drop_circular
 from factcheck.judge import apply_verified_labels
@@ -53,7 +63,7 @@ def _call_with_timeout(func, seconds: float, *args):
         except Exception as exc:  # noqa: BLE001 - re-raised on the caller thread
             box["error"] = exc
 
-    worker = threading.Thread(target=run, daemon=True)
+    worker = threading.Thread(target=bind_context(run), daemon=True)
     worker.start()
     worker.join(seconds)
     if worker.is_alive():
@@ -225,28 +235,20 @@ class VerificationService:
 
     def verify(self, *, text, claims, client, preclassified=None, charge=True, disconnect_check=None, question=None, started_at=None, budget=None, on_progress=None):
         reservation = self.billing.authorize(client) if charge else None
-        self._disconnect = disconnect_check
         meter = UsageMeter()
-        if hasattr(self.extractor, "meter"):
-            self.extractor.meter = meter
-        for ranker in (self.ranker_a, self.ranker_b, self.ranker_tie):
-            if ranker is not None and hasattr(ranker, "meter"):
-                ranker.meter = meter
-        for helper in (self.drafter, self.synopsizer):
-            if helper is not None and hasattr(helper, "meter"):
-                helper.meter = meter
+        state, token = begin_request(meter)
+        state.disconnect = disconnect_check
+        state.on_progress = on_progress
         started = started_at if started_at is not None else time.monotonic()
         budget = float(budget) if budget is not None else request_budget(self.settings, text)
         deadline = started + budget
-        self._deadline = deadline
-        self._phases = {"extract": 0.0, "retrieve": 0.0, "judge": 0.0, "review": 0.0}
-        self._on_progress = on_progress
+        state.deadline = deadline
         try:
             warnings: list[str] = []
             mode = "text"
             asked = question
             draft_answer = None
-            self._draft_text = ""
+            state.draft_text = ""
             check_text = text
             check_claims = claims
             if preclassified is None and not claims and text and not question and not is_bare_question(text):
@@ -259,7 +261,7 @@ class VerificationService:
                 asked = (question or text or "").strip()
                 model_name, drafted, stance = self._draft(asked)
                 draft_answer = DraftAnswer(model=model_name, text=drafted, stance=stance)
-                self._draft_text = drafted
+                state.draft_text = drafted
                 check_text = drafted
                 check_claims = None
             t_extract = time.monotonic()
@@ -268,7 +270,7 @@ class VerificationService:
             else:
                 try:
                     extracted, warnings = _call_with_timeout(
-                        self.extractor.extract, 12.0, check_text, check_claims
+                        self.extractor.extract, 15.0, check_text, check_claims
                     )
                 except Exception as exc:  # noqa: BLE001 - extraction must not consume the retrieval budget
                     snippet = (check_text or "")[:240]
@@ -278,12 +280,12 @@ class VerificationService:
                 extracted = [normalize_claim(item) for item in extracted]
             if check_claims is None and preclassified is None:
                 extracted = select_key_points(extracted, 6)
-            self._phases["extract"] = time.monotonic() - t_extract
+            set_phase("extract", time.monotonic() - t_extract)
             # Retrieval keeps 25s and the two-pass review keeps 16s on a real request.
             # A shorter budget, including a zero budget, is left alone so the request can stop.
             if budget >= 41 and deadline - time.monotonic() < 41:
                 deadline = time.monotonic() + 41
-                self._deadline = deadline
+                state.deadline = deadline
             if len(extracted) > self.settings.max_output_claims:
                 extracted = extracted[: self.settings.max_output_claims]
                 warnings.append("claim_limit")
@@ -307,14 +309,14 @@ class VerificationService:
                 from factcheck.review import run_review
 
                 run_review(payload, reviewer=self.reviewer, deadline=deadline, meter=meter)
-            self._phases["review"] = time.monotonic() - t_review
+            set_phase("review", time.monotonic() - t_review)
             total = time.monotonic() - started
             logger.warning(
                 "check phases extract=%.2fs retrieve=%.2fs judge=%.2fs review=%.2fs total=%.2fs budget=%.0fs chars=%d",
-                self._phases["extract"],
-                self._phases["retrieve"],
-                self._phases["judge"],
-                self._phases["review"],
+                phase_seconds("extract"),
+                phase_seconds("retrieve"),
+                phase_seconds("judge"),
+                phase_seconds("review"),
                 total,
                 budget,
                 len(text or ""),
@@ -335,12 +337,16 @@ class VerificationService:
             if reservation is not None:
                 self.billing.release(reservation)
             raise
+        finally:
+            end_request(token)
 
     def get(self, verification_id: str) -> VerificationOut | None:
         return self.store.get(verification_id)
 
     def _disconnected(self) -> bool:
-        return bool(self._disconnect and self._disconnect())
+        state = current_request()
+        check = state.disconnect if state is not None else None
+        return bool(check and check())
 
     def _not_checked(self, claim: ExtractedClaim, reason: str) -> ClaimOut:
         return ClaimOut(
@@ -421,7 +427,7 @@ class VerificationService:
             for job in jobs:
                 if time.monotonic() >= deadline or self._disconnected():
                     break
-                futures.append(pool.submit(job))
+                futures.append(pool.submit(bind_context(job)))
             for future in as_completed(futures):
                 try:
                     future.result()
@@ -435,7 +441,7 @@ class VerificationService:
                     else "Not checked: the time budget ran out before this claim was retrieved."
                 )
                 results[index] = self._not_checked(claim, reason)
-        callback = getattr(self, "_on_progress", None)
+        callback = current_request().on_progress if current_request() is not None else None
         if callback is not None:
             callback(sum(1 for item in results if item is not None), len(results))
         return [item for item in results if item is not None]
@@ -519,7 +525,7 @@ class VerificationService:
         scientific = any(claim.scientific or claim.claim_category in {"T2", "T3", "T4"} for claim in claims)
         categories = [claim.claim_category for claim in claims]
         before = getattr(self.retriever, "cost_usd", 0.0)
-        before_calls = getattr(self.retriever, "retrieval_calls", 0)
+        before_calls = retrieval_calls()
         t_retrieve = time.monotonic()
         hits = []
         seen_urls: set[str] = set()
@@ -543,14 +549,14 @@ class VerificationService:
                     continue
                 seen_urls.add(key)
                 hits.append(hit)
-        self._phases["retrieve"] = self._phases.get("retrieve", 0.0) + (time.monotonic() - t_retrieve)
-        added_calls = getattr(self.retriever, "retrieval_calls", before_calls) - before_calls
-        meter.retrieval_calls += added_calls if added_calls > 0 else len(claims)
+        add_phase("retrieve", time.monotonic() - t_retrieve)
+        meter.retrieval_calls += max(0, retrieval_calls() - before_calls)
         with self._meter_lock:
             meter.add_usd(getattr(self.retriever, "cost_usd", 0.0) - before, retriever=True)
         warnings.extend(getattr(self.retriever, "warnings", [])[-3:])
         hits = dedupe_urls(hits)
-        hits = drop_circular(hits, [claim.text for claim in claims], getattr(self, "_draft_text", ""))
+        draft = current_request().draft_text if current_request() is not None else ""
+        hits = drop_circular(hits, [claim.text for claim in claims], draft)
         hits = self._resolve_all(claims, hits, effort)
         sensitive = any(claim.time_sensitive for claim in claims)
         for hit in hits:
@@ -565,12 +571,13 @@ class VerificationService:
             if chosen and self.ranker_a and self.ranker_b and tool is None:
                 t_judge = time.monotonic()
                 votes = self._label_concurrent(claim, chosen)
-                self._phases["judge"] = self._phases.get("judge", 0.0) + (time.monotonic() - t_judge)
+                add_phase("judge", time.monotonic() - t_judge)
                 if len(votes) >= 2 and _labels_disagree(votes[0], votes[1]) and self.ranker_tie:
                     tie = self.ranker_tie.rank([claim], chosen)
                     if tie:
                         votes.append(tie[0])
                 chosen = apply_verified_labels(chosen, votes)
+            chosen = apply_debunk_labels(claim.text, chosen)
             decision = decide(
                 chosen,
                 category=claim.claim_category,
@@ -587,11 +594,11 @@ class VerificationService:
             results[indexes[offset]] = self._claim_out(claim, effort, decision, chosen, tool, votes, checks)
 
     def _label_concurrent(self, claim: ExtractedClaim, passages: list[Evidence]):
+        rank_a = bind_context(self.ranker_a.rank, [claim], passages)
+        rank_b = bind_context(self.ranker_b.rank, [claim], passages)
+
         async def _both():
-            first, second = await asyncio.gather(
-                asyncio.to_thread(self.ranker_a.rank, [claim], passages),
-                asyncio.to_thread(self.ranker_b.rank, [claim], passages),
-            )
+            first, second = await asyncio.gather(asyncio.to_thread(rank_a), asyncio.to_thread(rank_b))
             return first, second
 
         first, second = asyncio.run(_both())
@@ -602,7 +609,8 @@ class VerificationService:
         crawl_budget = EFFORT_LIMITS[effort]["crawl"]
         resolved = []
         scholarly = {"openalex", "semantic_scholar", "pubmed", "europepmc", "wikidata", "loc", "google_factcheck", "wikipedia"}
-        deadline = getattr(self, "_deadline", None)
+        state = current_request()
+        deadline = state.deadline if state is not None else None
         fetched = 0
         for hit in hits:
             if deadline is not None and time.monotonic() > deadline - 12:

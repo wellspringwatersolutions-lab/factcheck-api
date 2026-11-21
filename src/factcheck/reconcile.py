@@ -50,32 +50,42 @@ def _starts(text: str, answer: str) -> bool:
 
 
 def _tldr(answer: str, draft: str, caveats: list[str], correction: str) -> str:
+    from factcheck.synopsis import complete_sentence
+
     if answer == "not_enough_evidence":
         return "There wasn't enough evidence to settle this."
+    lead = _lead(answer) or "Partly"
     if correction and answer in {"yes", "no", "partly"}:
         sentence = correction.removeprefix("Correction:").strip()
-        lead = _lead(answer)
-        if sentence and not _starts(sentence, answer):
-            sentence = f"{lead}. {sentence[0].upper() + sentence[1:] if sentence else sentence}"
+        if sentence and sentence[0].islower():
+            sentence = sentence[0].upper() + sentence[1:]
         if sentence and sentence[-1] not in ".!?":
             sentence += "."
-        return sentence
-    body = " ".join((draft or "").split())
-    if body.lower().startswith("unconfirmed:"):
-        body = body.split(":", 1)[-1].strip()
-    if answer in {"yes", "no"} and not _starts(body, answer):
-        body = f"{_lead(answer)}. {body}"
-    if answer == "partly" and not _starts(body, "partly"):
-        body = f"Partly. {body}"
-    if caveats and not _CAVEAT.search(body):
-        extra = caveats[0].rstrip(".")
-        body = body.rstrip(".") + f", but {extra[0].lower() + extra[1:]}."
-    words = body.split()
-    if len(words) > 30:
-        body = " ".join(words[:30]).rstrip(",;:") + "."
-    if body and body[-1] not in ".!?":
-        body += "."
-    return body
+        built = sentence if _starts(sentence, answer) else f"{lead}. {sentence}"
+        if complete_sentence(built):
+            return built
+    pieces = [part.strip() for part in re.split(r"(?<=[.!?])\s+", " ".join((draft or "").split())) if part.strip()]
+    first = next((part for part in pieces if complete_sentence(part)), "")
+    caveat = ""
+    if caveats:
+        caveat = caveats[0].strip()
+        if caveat and caveat[-1] not in ".!?":
+            caveat += "."
+        if caveat and caveat[0].islower():
+            caveat = caveat[0].upper() + caveat[1:]
+        if not complete_sentence(caveat):
+            caveat = ""
+    if first and _starts(first, answer) and (not caveat or _CAVEAT.search(first)):
+        return first
+    if caveat:
+        built = f"{lead}. {caveat}"
+        if complete_sentence(built):
+            return built
+    if first:
+        built = first if _starts(first, answer) else f"{lead}. {first}"
+        if complete_sentence(built) and len(built.split()) <= 30:
+            return built
+    return f"{lead}. The checked evidence supports this answer."
 
 
 def _summary(answer: str, rating: str, tldr: str, correction: str) -> str:

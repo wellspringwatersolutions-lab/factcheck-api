@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass, field
 
 
@@ -95,16 +96,19 @@ class UsageMeter:
     retriever_cost_usd: float = 0.0
     retrieval_calls: int = 0
     models: dict[str, str] = field(default_factory=dict)
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
 
     def add_tokens(self, *, model: str, provider: str, input_tokens: int, output_tokens: int, cost: float) -> None:
-        self.input_tokens += input_tokens
-        self.output_tokens += output_tokens
-        self.estimated_cost_usd += cost
-        self.models[provider] = model
+        with self._lock:
+            self.input_tokens += input_tokens
+            self.output_tokens += output_tokens
+            self.estimated_cost_usd += cost
+            self.models[provider] = model
 
     def add_usd(self, amount: float, *, retriever: bool = False) -> None:
         if amount <= 0:
             return
-        self.estimated_cost_usd += amount
-        if retriever:
-            self.retriever_cost_usd += amount
+        with self._lock:
+            self.estimated_cost_usd += amount
+            if retriever:
+                self.retriever_cost_usd += amount

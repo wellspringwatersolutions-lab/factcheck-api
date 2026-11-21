@@ -1,3 +1,5 @@
+import json
+
 import httpx
 
 from factcheck.aggregate import decide
@@ -106,22 +108,26 @@ def test_extraction_drops_headings_and_repairs_json():
     assert payload["sentences"][0]["label"] == "fact"
 
 
-def test_recent_claims_use_desearch_news_and_long_text_gets_75_seconds():
+def test_recent_claims_use_desearch_search_and_long_text_gets_75_seconds():
     seen = []
 
     def handler(request: httpx.Request) -> httpx.Response:
-        seen.append((request.url.path, dict(request.url.params)))
-        assert request.url.path in {"/web", "/news"}
+        if request.method == "POST":
+            body = json.loads(request.content.decode())
+            seen.append(request.url.path)
+            assert "time" not in body
+            assert "gives" not in body["query"]
+            return httpx.Response(200, json={"results": []}, headers={"X-Desearch-Cost-Usd": "0"})
+        seen.append(request.url.path)
+        assert request.url.path == "/web"
         assert "time" not in request.url.params
-        assert "gives" not in request.url.params["query"]
-        assert "In " not in request.url.params["query"]
         return httpx.Response(200, json={"data": []}, headers={"X-Desearch-Cost-Usd": "0"})
 
     DesearchRetriever("k", client=httpx.Client(transport=httpx.MockTransport(handler))).search_web_and_news(
         ["FORTRESS America Hegseth 90 days bases hack"],
         window=None,
     )
-    assert {path for path, _params in seen} == {"/web", "/news"}
+    assert seen == ["/web", "/search"]
     settings = Settings(_env_file=None, llm_mode="mock")
     assert settings.max_checked_claims == 10
     assert settings.check_concurrency == 6
