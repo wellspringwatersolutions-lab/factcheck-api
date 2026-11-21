@@ -71,7 +71,28 @@ python -m factcheck.cli serve --port 8741
 
 With no API keys the service still runs. Math is recomputed locally. Fact claims come back Unverified until a retriever can fetch a page. SQLite (`./data/factcheck.db`) and an in-memory cache are the defaults, so Postgres and Redis are optional.
 
-A normal check aims to finish within about 45 seconds, including the two-pass review. A pasted answer longer than 3,500 characters is allowed 75 seconds. The website that calls `/check` should wait at least 75 seconds before aborting the request.
+A normal check aims to finish within about 45 seconds, including the two-pass review. A pasted answer longer than 3,500 characters is allowed 75 seconds. The clock starts after the request body is parsed. Extraction is capped at 12 seconds. Retrieval keeps at least 25 seconds and the review keeps 8 seconds.
+
+Long pastes can also be checked in the background:
+
+```http
+POST /check
+{"text": "...", "async": true}
+```
+
+`Prefer: respond-async` does the same thing. The response is `202`:
+
+```json
+{"job_id": "<uuid>", "status": "queued"}
+```
+
+Poll `GET /v1/jobs/<job_id>`:
+
+```json
+{"job_id": "<uuid>", "status": "running", "progress": {"done": 3, "total": 10}, "report": null, "error": null}
+```
+
+`status` is `queued`, `running`, `done`, or `error`. When `status` is `done`, `report` is the same object `POST /check` returns. The job budget is 120 seconds. The synchronous `POST /check` and `POST /v1/verify` paths stay for agents. The website should wait at least 75 seconds on the sync path, or poll the job.
 
 Open `http://127.0.0.1:8741/health`. Interactive API docs are at `/docs`.
 

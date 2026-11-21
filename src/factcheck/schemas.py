@@ -183,10 +183,11 @@ class VerificationOut(BaseModel):
 
 
 class VerifyIn(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
     text: str | None = None
     claims: list[str] | None = None
     question: str | None = None
+    async_job: bool = Field(default=False, alias="async")
 
 
 DISCLAIMER = (

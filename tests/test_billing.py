@@ -71,16 +71,15 @@ def test_credits_are_prepaid_and_rejected_when_empty():
 def test_failed_check_does_not_consume_the_free_check():
     service, _, _, _ = make_service()
 
-    class BoomExtract:
-        def extract(self, text, claims):
-            raise RuntimeError("boom")
+    def boom(*args, **kwargs):
+        raise RuntimeError("boom")
 
-    service.extractor = BoomExtract()
+    service.store.save = boom
     try:
         service.verify(text="The council raised property taxes in 2019 after a long debate.", claims=None, client=client(fingerprint="retry"))
         raise AssertionError("expected failure")
     except RuntimeError:
         pass
-    service.extractor = __import__("factcheck.extract", fromlist=["HeuristicExtractor"]).HeuristicExtractor()
+    del service.store.save
     result = service.verify(text=None, claims=["2 + 2 = 4"], client=client(fingerprint="retry"))
     assert result.verification_id

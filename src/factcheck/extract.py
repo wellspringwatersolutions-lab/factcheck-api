@@ -2,14 +2,21 @@
 
 from __future__ import annotations
 
+import logging
 import re
+import time
 from dataclasses import dataclass
 
 from factcheck.categories import classify_category, is_hypothesis, is_math, normalize_claim
-from factcheck.cleanup import clean_claim_text, prepare_answer
+from concurrent.futures import ThreadPoolExecutor, TimeoutError, as_completed
+
+from factcheck.cleanup import chunk_paragraphs, clean_claim_text, prepare_answer
 from factcheck.llm import LLMError, estimate_cost, loads_object
 from factcheck.textutil import is_time_sensitive, split_sentences
 from factcheck.types import ExtractedClaim, UsageMeter
+
+logger = logging.getLogger("factcheck")
+_EXTRACT_BUDGET = 12.0
 
 _PRONOUN = re.compile(r"\b(He|She|They|It|This|That)\b(?!')")
 _FILLER_ONLY = re.compile(r"^(of course|that said|well|anyway|look)[.!]?$", re.I)
@@ -149,18 +156,34 @@ def parse_disambiguation(payload: dict, originals: dict[int, str] | None = None)
 def parse_decomposition(payload: dict) -> list[ExtractedClaim]:
     claims = []
     for item in payload.get("claims") or []:
-        text = (item.get("text") or "").strip()
+        if isinstance(item, str):
+            text = item.strip()
+            claim_type = "opinion" if _OPINION.search(text) else "fact"
+            category = classify_category(text, claim_type)
+            attribution = _attribution(text)
+            time_sensitive = is_time_sensitive(text)
+            scientific = False
+            hypothesis = is_hypothesis(text)
+        elif isinstance(item, dict):
+            text = (item.get("text") or "").strip()
+            claim_type = "opinion" if item.get("claim_type") == "opinion" else "fact"
+            category = item.get("claim_category") or classify_category(text, claim_type)
+            attribution = item.get("attribution")
+            time_sensitive = bool(item.get("time_sensitive"))
+            scientific = bool(item.get("scientific"))
+            hypothesis = bool(item.get("hypothesis")) or is_hypothesis(text)
+        else:
+            continue
         if not text:
             continue
-        claim_type = "opinion" if item.get("claim_type") == "opinion" else "fact"
         claim = ExtractedClaim(
             text=text,
             claim_type=claim_type,
-            claim_category=item.get("claim_category") or classify_category(text, claim_type),
-            time_sensitive=bool(item.get("time_sensitive")),
-            scientific=bool(item.get("scientific")),
-            attribution=item.get("attribution"),
-            hypothesis=bool(item.get("hypothesis")) or is_hypothesis(text),
+            claim_category=category,
+            time_sensitive=time_sensitive,
+            scientific=scientific,
+            attribution=attribution,
+            hypothesis=hypothesis,
         )
         claims.append(normalize_claim(claim))
     return claims
@@ -189,6 +212,69 @@ Attributed claims must say who said it, not state the content as an unattributed
 Mark time_sensitive, scientific, hypothesis (prediction, novel conjecture, or business idea), and claim_category T1-T8.
 T1 math, T2 scientific law, T3 well-supported theory, T4 medical or empirical, T5 historical, T6 expert consensus, T7 eyewitness, T8 opinion.
 Return JSON {"claims": [{"text": "...", "claim_type": "fact", "claim_category": "T5", "time_sensitive": false, "scientific": false, "hypothesis": false, "attribution": null}]}"""
+
+
+def _claims_from_result(result) -> list[ExtractedClaim]:
+    """Parse one extraction response. Repair trailing commas locally. Never call the model again."""
+    import json
+
+    from factcheck.textutil import parse_json_object
+
+    raw = result.content or ""
+    snippet = raw[:400]
+    if not raw.strip():
+        logger.warning("extraction ValueError: empty json snippet=%r", snippet)
+        raise ValueError("empty json")
+    repaired = re.sub(r",\s*([}\]])", r"\1", raw)
+    try:
+        payload = parse_json_object(repaired)
+    except (ValueError, TypeError) as exc:
+        start = repaired.find("[")
+        end = repaired.rfind("]")
+        value = None
+        if start >= 0 and end > start:
+            try:
+                value = json.loads(repaired[start : end + 1])
+            except json.JSONDecodeError:
+                value = None
+        if not isinstance(value, list):
+            logger.warning("extraction ValueError: %s snippet=%r", exc, snippet)
+            raise
+        payload = {"claims": value}
+    return parse_decomposition(payload)
+
+
+_CLAIM_SCHEMA = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "claims",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "claims": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "text": {"type": "string"},
+                            "claim_type": {"type": "string", "enum": ["fact", "opinion"]},
+                            "claim_category": {"type": "string"},
+                            "time_sensitive": {"type": "boolean"},
+                            "scientific": {"type": "boolean"},
+                            "hypothesis": {"type": "boolean"},
+                            "attribution": {"type": ["string", "null"]},
+                        },
+                        "required": ["text", "claim_type", "claim_category", "time_sensitive", "scientific", "hypothesis", "attribution"],
+                    },
+                }
+            },
+            "required": ["claims"],
+        },
+    },
+}
 
 
 class LiveExtractor:
@@ -250,38 +336,79 @@ class LiveExtractor:
                 raise ValueError("unrepairable json")
             return payload
 
+    def _one_chunk(self, chunk: str) -> list[ExtractedClaim]:
+        result = self.client.complete(
+            model=self.model,
+            messages=[
+                {"role": "system", "content": _DECOMPOSE},
+                {"role": "user", "content": chunk},
+            ],
+            temperature=0.0,
+            max_tokens=700,
+            timeout=8.0,
+            response_format=_CLAIM_SCHEMA,
+        )
+        self.meter.add_tokens(
+            model=result.model,
+            provider=result.provider,
+            input_tokens=result.input_tokens,
+            output_tokens=result.output_tokens,
+            cost=estimate_cost(self.settings, result.model, result.input_tokens, result.output_tokens),
+        )
+        claims = _claims_from_result(result)
+        if not claims:
+            logger.warning("extraction ValueError: decomposition returned no claims snippet=%r", (result.content or "")[:400])
+            raise ValueError("decomposition returned no claims")
+        return claims
+
     def extract(self, text: str | None, claims: list[str] | None) -> tuple[list[ExtractedClaim], list[str]]:
-        sentences = build_sentences(prepare_answer(text) if text else None, [clean_claim_text(claim) for claim in claims] if claims else None)
-        if not sentences:
+        if claims:
+            return heuristic_extract(text, claims), []
+        prepared = prepare_answer(text) if text else ""
+        chunks = chunk_paragraphs(prepared)
+        if not chunks:
             return [], []
+        deadline = time.monotonic() + _EXTRACT_BUDGET
+        found: list[ExtractedClaim] = []
+        warnings: list[str] = []
+        pool = ThreadPoolExecutor(max_workers=min(4, len(chunks)))
+        futures = {pool.submit(self._one_chunk, chunk): chunk for chunk in chunks}
+        pending = set(futures)
         try:
-            payload = "\n".join(f"[{item.id}] {item.text}\ncontext: {item.context}" for item in sentences)
-            labels = parse_selection(self._ask(_SELECTION, payload), len(sentences))
-            kept = [item for item in sentences if labels[item.id] != "drop"]
-            if not kept:
-                return [], []
-            disambiguated = parse_disambiguation(
-                self._ask(_DISAMBIG, "\n".join(f"[{item.id}] {item.text}\ncontext: {item.context}" for item in kept)),
-                {item.id: item.text for item in kept},
-            )
-            by_id = {row["id"]: row for row in disambiguated}
-            resolved_lines = []
-            for item in kept:
-                row = by_id.get(item.id)
-                if row is None:
-                    resolved_lines.append(f"[{item.id}] ({labels[item.id]}) {item.text}")
-                    continue
-                if row["drop"] or not row["text"]:
-                    continue
-                resolved_lines.append(f"[{item.id}] ({row['claim_type']}) {row['text']}")
-            if not resolved_lines:
-                return [], []
-            claims_out = parse_decomposition(self._ask(_DECOMPOSE, "\n".join(resolved_lines)))
-            if not claims_out:
-                raise ValueError("decomposition returned no claims")
-            return claims_out, []
-        except (LLMError, ValueError, KeyError, TypeError) as exc:
-            return heuristic_extract(text, claims), [f"extraction_fallback:{exc.__class__.__name__}"]
+            try:
+                for future in as_completed(futures, timeout=max(0.1, deadline - time.monotonic())):
+                    pending.discard(future)
+                    chunk = futures[future]
+                    try:
+                        found.extend(future.result())
+                    except (LLMError, ValueError, KeyError, TypeError) as exc:
+                        logger.warning("extraction_fallback %s: %s snippet=%r", exc.__class__.__name__, exc, chunk[:240])
+                        found.extend(heuristic_extract(chunk, None))
+                        warnings.append(f"extraction_fallback:{exc.__class__.__name__}")
+            except TimeoutError:
+                logger.warning("extraction exceeded %.0fs; using the sentence splitter", _EXTRACT_BUDGET)
+                warnings.append("extraction_fallback:TimeoutError")
+                for future, chunk in futures.items():
+                    if future not in pending:
+                        continue
+                    if future.done():
+                        try:
+                            found.extend(future.result())
+                            continue
+                        except (LLMError, ValueError, KeyError, TypeError):
+                            pass
+                    found.extend(heuristic_extract(chunk, None))
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
+        seen: set[str] = set()
+        unique = []
+        for claim in found:
+            key = " ".join(claim.text.lower().split())
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            unique.append(claim)
+        return unique, warnings
 
 
 class HeuristicExtractor:

@@ -155,6 +155,40 @@ def _table_row(line: str) -> str | None:
     return text if text.endswith(".") else text + "."
 
 
+def peel_leading_question(text: str) -> tuple[str | None, str]:
+    """A pasted question followed by an answer is context, not a claim."""
+    dialogue = split_dialogue(text)
+    if dialogue is not None:
+        return dialogue.question, dialogue.answer
+    lines = (text or "").splitlines()
+    index = next((i for i, line in enumerate(lines) if line.strip()), None)
+    if index is None:
+        return None, text or ""
+    first = lines[index].strip()
+    rest = "\n".join(lines[index + 1 :]).strip()
+    if rest and (first.endswith("?") or is_bare_question(first)):
+        return first, rest
+    return None, text or ""
+
+
+def chunk_paragraphs(text: str, size: int = 1200) -> list[str]:
+    """Split a long answer into chunks of about `size` characters on paragraph breaks."""
+    paragraphs = [part.strip() for part in re.split(r"\n\s*\n", text or "") if part.strip()]
+    if not paragraphs:
+        paragraphs = [line.strip() for line in (text or "").splitlines() if line.strip()]
+    chunks: list[str] = []
+    current = ""
+    for paragraph in paragraphs:
+        if current and len(current) + len(paragraph) + 1 > size:
+            chunks.append(current)
+            current = paragraph
+        else:
+            current = f"{current}\n{paragraph}".strip()
+    if current:
+        chunks.append(current)
+    return chunks
+
+
 def prepare_answer(text: str) -> str:
     """Drop citation chrome, offers, questions, and earlier chat turns. Split table rows into their own lines."""
     kept: list[str] = []

@@ -49,6 +49,18 @@ class CreditLedgerRow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
+class JobRow(Base):
+    __tablename__ = "jobs"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    status: Mapped[str] = mapped_column(String(16), default="queued")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    progress_done: Mapped[int] = mapped_column(Integer, default=0)
+    progress_total: Mapped[int] = mapped_column(Integer, default=0)
+    report: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    error: Mapped[str | None] = mapped_column(String(400), nullable=True)
+
+
 class FreeCheckRow(Base):
     __tablename__ = "free_checks"
     fingerprint: Mapped[str] = mapped_column(String(64), primary_key=True)
@@ -123,6 +135,43 @@ class Store:
                 )
             )
             session.commit()
+
+    def create_job(self, job_id: str) -> None:
+        now = datetime.now(timezone.utc)
+        with self.factory() as session:
+            session.add(JobRow(id=job_id, status="queued", created_at=now, updated_at=now, progress_done=0, progress_total=0))
+            session.commit()
+
+    def update_job(self, job_id: str, *, status: str | None = None, done: int | None = None, total: int | None = None, report: dict | None = None, error: str | None = None) -> None:
+        with self.factory() as session:
+            row = session.get(JobRow, job_id)
+            if row is None:
+                return
+            if status is not None:
+                row.status = status
+            if done is not None:
+                row.progress_done = done
+            if total is not None:
+                row.progress_total = total
+            if report is not None:
+                row.report = report
+            if error is not None:
+                row.error = error[:400]
+            row.updated_at = datetime.now(timezone.utc)
+            session.commit()
+
+    def get_job(self, job_id: str) -> dict | None:
+        with self.factory() as session:
+            row = session.get(JobRow, job_id)
+            if row is None:
+                return None
+            return {
+                "job_id": row.id,
+                "status": row.status,
+                "progress": {"done": row.progress_done, "total": row.progress_total},
+                "report": row.report,
+                "error": row.error,
+            }
 
     def get(self, verification_id: str) -> VerificationOut | None:
         with self.factory() as session:

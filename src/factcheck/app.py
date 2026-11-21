@@ -6,6 +6,10 @@ from contextlib import asynccontextmanager
 from urllib.parse import urlparse
 
 import asyncio
+import logging
+import threading
+import time
+from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -22,6 +26,8 @@ from factcheck.report_html import render_home, render_report
 from factcheck.schemas import VerifyIn
 from factcheck.web_report import to_check_report
 from factcheck.wiring import build_service
+
+logger = logging.getLogger("factcheck")
 
 
 class IdentityMiddleware:
@@ -126,7 +132,7 @@ def create_app(settings: Settings | None = None, service=None) -> FastAPI:
         intent = gateway.create_checkout(api_key_id="", pack_id=pack_id)
         return JSONResponse(status_code=501, content={"error": {"code": "payment_not_configured", **intent.__dict__}})
 
-    def _run_verify(body: VerifyIn, disconnect_check=None):
+    def _run_verify(body: VerifyIn, disconnect_check=None, *, started_at=None, budget=None, on_progress=None):
         question = (body.question or "").strip() or None
         if not body.text and not body.claims and not question:
             raise HTTPException(status_code=422, detail="Provide text, claims, or a question.")
@@ -144,6 +150,9 @@ def create_app(settings: Settings | None = None, service=None) -> FastAPI:
                 client=identity,
                 disconnect_check=disconnect_check,
                 question=question,
+                started_at=started_at if started_at is not None else time.monotonic(),
+                budget=budget,
+                on_progress=on_progress,
             )
         except BillingError as exc:
             return JSONResponse(status_code=exc.status, content=exc.body())
@@ -178,13 +187,56 @@ def create_app(settings: Settings | None = None, service=None) -> FastAPI:
     async def verify(body: VerifyIn, request: Request):
         return await _execute(body, request)
 
+    def _wants_async(body: VerifyIn, request: Request) -> bool:
+        prefer = (request.headers.get("prefer") or "").lower()
+        return bool(body.async_job or "respond-async" in prefer)
+
+    def _start_job(body: VerifyIn, request: Request):
+        job_id = str(uuid4())
+        service.store.create_job(job_id)
+        identity = current_identity()
+        source_text = (body.question or "").strip() or body.text or "\n".join(body.claims or [])
+
+        def progress(done: int, total: int) -> None:
+            service.store.update_job(job_id, status="running", done=done, total=total)
+
+        def run() -> None:
+            token = set_identity(identity)
+            service.store.update_job(job_id, status="running")
+            try:
+                result = _run_verify(body, None, started_at=time.monotonic(), budget=120, on_progress=progress)
+            except Exception as exc:  # noqa: BLE001 - the job record is the error channel
+                logger.warning("job %s failed %s", job_id, exc.__class__.__name__)
+                service.store.update_job(job_id, status="error", error=exc.__class__.__name__)
+                return
+            finally:
+                reset_identity(token)
+            if isinstance(result, JSONResponse):
+                service.store.update_job(job_id, status="error", error="check_failed")
+                return
+            report = to_check_report(result, source_text)
+            total = len(report.get("claims") or [])
+            service.store.update_job(job_id, status="done", done=total, total=total, report=report)
+
+        threading.Thread(target=run, name=f"factcheck-job-{job_id[:8]}", daemon=True).start()
+        return JSONResponse(status_code=202, content={"job_id": job_id, "status": "queued"})
+
     @app.post("/check")
     async def check(body: VerifyIn, request: Request):
+        if _wants_async(body, request):
+            return _start_job(body, request)
         result = await _execute(body, request)
         if isinstance(result, JSONResponse):
             return result
         source_text = (body.question or "").strip() or body.text or "\n".join(body.claims or [])
         return to_check_report(result, source_text)
+
+    @app.get("/v1/jobs/{job_id}")
+    def get_job(job_id: str):
+        found = service.store.get_job(job_id)
+        if found is None:
+            return JSONResponse(status_code=404, content={"error": {"code": "not_found", "message": "No job with that id."}})
+        return found
 
     @app.get("/v1/verification/{verification_id}")
     def get_verification(verification_id: str):

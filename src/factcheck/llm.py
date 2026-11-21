@@ -52,14 +52,23 @@ class OpenAICompatClient:
         self.timeout = timeout
         self._client = client or httpx.Client(timeout=timeout)
 
-    def complete(self, *, model: str, messages: list[dict], temperature: float = 0.0, max_tokens: int = 800, timeout: float | None = None) -> LLMResult:
+    def complete(
+        self,
+        *,
+        model: str,
+        messages: list[dict],
+        temperature: float = 0.0,
+        max_tokens: int = 800,
+        timeout: float | None = None,
+        response_format: dict | None = None,
+    ) -> LLMResult:
         use_model = self.fixed_model or model
         payload = {
             "model": use_model,
             "messages": messages,
             "temperature": temperature,
             "max_tokens": max_tokens,
-            "response_format": {"type": "json_object"},
+            "response_format": response_format or {"type": "json_object"},
             # Qwen and GLM otherwise spend the budget on hidden reasoning and can return empty content.
             "enable_thinking": False,
             "reasoning_effort": "low",
@@ -74,11 +83,14 @@ class OpenAICompatClient:
             response = self._post(url, payload, headers, timeout=timeout)
         response.raise_for_status()
         content, usage, served = self._read(response)
-        if not content.strip():
+        claims_schema = (response_format or {}).get("json_schema", {}).get("name") == "claims"
+        # Judges sometimes return an empty body. Extraction must keep the raw body so the
+        # failure is logged, and must not spend a second call repairing it.
+        if not content.strip() and not claims_schema:
             retry = self._post(url, payload, headers, timeout=timeout)
             retry.raise_for_status()
             content, usage, served = self._read(retry)
-        if not content.strip():
+        if not content.strip() and not claims_schema:
             content = '{"passages": []}'
         return LLMResult(
             content=content,
@@ -104,11 +116,27 @@ class FailoverClient:
     def __init__(self, providers: list):
         self.providers = providers
 
-    def complete(self, *, model: str, messages: list[dict], temperature: float = 0.0, max_tokens: int = 800, timeout: float | None = None) -> LLMResult:
+    def complete(
+        self,
+        *,
+        model: str,
+        messages: list[dict],
+        temperature: float = 0.0,
+        max_tokens: int = 800,
+        timeout: float | None = None,
+        response_format: dict | None = None,
+    ) -> LLMResult:
         errors: list[str] = []
         for provider in self.providers:
             try:
-                return provider.complete(model=model, messages=messages, temperature=temperature, max_tokens=max_tokens, timeout=timeout)
+                return provider.complete(
+                    model=model,
+                    messages=messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    timeout=timeout,
+                    response_format=response_format,
+                )
             except Exception as exc:  # noqa: BLE001 - failover is the point
                 errors.append(f"{provider.name}: {exc}")
         raise LLMError("; ".join(errors) or "no language-model provider is configured")
@@ -119,7 +147,16 @@ class ScriptedLLM:
         self.responses = list(responses)
         self.calls: list[dict] = []
 
-    def complete(self, *, model: str, messages: list[dict], temperature: float = 0.0, max_tokens: int = 800, timeout: float | None = None) -> LLMResult:
+    def complete(
+        self,
+        *,
+        model: str,
+        messages: list[dict],
+        temperature: float = 0.0,
+        max_tokens: int = 800,
+        timeout: float | None = None,
+        response_format: dict | None = None,
+    ) -> LLMResult:
         self.calls.append({"model": model, "messages": messages})
         content = self.responses.pop(0) if self.responses else "{}"
         return LLMResult(content, 20, 20, model, "script", family_of(model))
