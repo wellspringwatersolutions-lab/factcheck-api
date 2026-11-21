@@ -33,7 +33,7 @@ class Decision:
 def is_authoritative(passage: Evidence) -> bool:
     """One peer-reviewed, official, or encyclopedic source can carry a claim."""
     host = hostname(passage.url)
-    if passage.source_type == "peer_reviewed" and passage.grade in {"A", "B"}:
+    if passage.source_type in {"peer_reviewed", "structured"} and passage.grade in {"A", "B"}:
         return True
     if passage.source_type in {"primary", "textbook", "systematic_review", "data", "rct"} and passage.grade in {"A", "B"}:
         return True

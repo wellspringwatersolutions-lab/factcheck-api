@@ -96,13 +96,19 @@ class GoogleFactCheckRetriever:
         hits = []
         for claim in payload.get("claims") or []:
             for review in (claim.get("claimReview") or [])[:limit]:
+                publisher = (review.get("publisher") or {}).get("name") or "Fact-checker"
+                rating = review.get("textualRating") or ""
                 hits.append(
                     Evidence(
                         url=review.get("url") or "",
-                        title=review.get("title") or (review.get("publisher") or {}).get("name") or "",
-                        snippet=f"{review.get('textualRating') or ''}. {claim.get('text') or ''}".strip(),
+                        title=review.get("title") or publisher,
+                        snippet=f"{publisher} rating: {rating}. {claim.get('text') or ''}".strip(),
+                        page_text=f"{publisher} rating: {rating}.",
                         published_at=review.get("reviewDate"),
                         provider="google_factcheck",
+                        source_type="fact_checker",
+                        grade="B",
+                        study_type="published_fact_check",
                     )
                 )
         return [hit for hit in hits if hit.url][:limit]
@@ -112,9 +118,10 @@ from factcheck.scholarly import PubMedRetriever, SemanticScholarRetriever
 
 
 class CompositeRetriever:
-    def __init__(self, providers: list, scholarly=None):
+    def __init__(self, providers: list, scholarly=None, references=None):
         self.providers = [provider for provider in providers if not getattr(provider, "scientific_only", False)]
         self.scholarly = scholarly
+        self.references = references
         self.warnings: list[str] = []
         self.timeout = 8.0
 
@@ -126,6 +133,11 @@ class CompositeRetriever:
         jobs = [lambda provider=provider: provider.search(query, limit=limit) for provider in self.providers]
         if self.scholarly and (scientific or set(categories or []) & {"T2", "T3", "T4"}):
             jobs.append(lambda: self.scholarly.search(query, limit=limit, categories=categories or (["T2"] if scientific else [])))
+        if self.references is not None:
+            from factcheck.references import wants_reference_sources
+
+            if wants_reference_sources(categories, query):
+                jobs.append(lambda: self.references.search(query, limit=limit, categories=categories))
         hits: list[Evidence] = []
         if not jobs:
             return []
@@ -141,6 +153,8 @@ class CompositeRetriever:
                 self.warnings.append("retriever:timeout")
         if self.scholarly:
             self.warnings.extend(getattr(self.scholarly, "warnings", []))
+        if self.references is not None:
+            self.warnings.extend(getattr(self.references, "warnings", []))
         seen: set[str] = set()
         kept = []
         for hit in hits:

@@ -51,6 +51,7 @@ class Settings(BaseSettings):
     desearch_api_key: str = ""
     desearch_base_url: str = "https://api.desearch.ai"
     google_factcheck_api_key: str = ""
+    claimbuster_api_key: str = ""
     semantic_scholar_api_key: str = ""
     openalex_email: str = ""
     openalex_api_key: str = ""

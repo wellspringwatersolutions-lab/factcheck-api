@@ -97,12 +97,13 @@ That starts the API on port 8741, Postgres, and Redis. Put keys in `.env`. `.env
 | `SOMA_API_KEY` | Internal dev endpoint only (`https://app.thesoma.ai/v1`, model `openrouter/deepseek/deepseek-v4-pro`). Not for production. Ignored unless `SOMA_ENABLED=true`, or it is the only key available. |
 | `OPENAI_COMPAT_BASE_URL` / `OPENAI_COMPAT_API_KEY` | Backup OpenAI-compatible provider. |
 | `DESEARCH_API_KEY` | Web search (`GET /web`) and page text (`GET /web/extract`). `Authorization` is the raw key. |
-| `GOOGLE_FACTCHECK_API_KEY` | Google Fact Check Tools `claims:search`. |
+| `GOOGLE_FACTCHECK_API_KEY` | Optional. Google Fact Check Tools `claims:search`. Skipped when blank. Ratings are cited as secondary evidence and do not decide the verdict. |
+| `CLAIMBUSTER_API_KEY` | Optional. Check-worthiness scores used only to order claims under the cap. Skipped when blank or slow. |
+| `NCBI_EMAIL` | Contact email sent with Wikidata, Chronicling America, and NCBI requests. |
 | `SEMANTIC_SCHOLAR_API_KEY` | Optional. Without it, Semantic Scholar is limited to about 1 request per second. |
 | `OPENALEX_EMAIL` | Mailto for the OpenAlex polite pool. Required for OpenAlex. |
 | `OPENALEX_API_KEY` | Optional OpenAlex key. |
 | `NCBI_API_KEY` | Optional. Raises the PubMed rate limit. |
-| `NCBI_EMAIL` | Contact email sent to NCBI. Default `dev@localhost`. |
 | `DATABASE_URL` | Default SQLite. On Render use `sqlite:////var/data/factcheck.db`. |
 | `FREE_DAILY_CAP_USD` | Same cap as `FREE_DAILY_SPEND_CAP_USD`. Default `20`. |
 | `REDIS_URL` | Optional cache. Without it, the cache is in memory. |

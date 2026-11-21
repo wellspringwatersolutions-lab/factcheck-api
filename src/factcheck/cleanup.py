@@ -86,11 +86,14 @@ def focus_query(text: str, limit_words: int = 16) -> str:
     return " ".join(words[:limit_words])[:160]
 
 
-def priority(claim: ExtractedClaim) -> tuple[int, int, int]:
-    """Lower sorts first. Dosage, medical, and numeric claims are checked before the rest."""
+def priority(claim: ExtractedClaim, worthiness: float = 0.0) -> tuple[int, int, int, float]:
+    """Lower sorts first. Dosage, medical, and numeric claims are checked before the rest.
+
+    `worthiness` is an optional ClaimBuster score. Higher scores are checked sooner.
+    """
     category_rank = {"T4": 0, "T1": 1, "T2": 2, "T3": 3, "T5": 4, "T6": 5, "T7": 6, "T8": 8}.get(
         claim.claim_category, 5
     )
     stakes = 0 if claim.fragile or claim.claim_category in {"T1", "T4"} else 1
     kind = 0 if claim.claim_type == "fact" else 1
-    return (stakes, category_rank, kind)
+    return (stakes, category_rank, kind, -float(worthiness or 0.0))

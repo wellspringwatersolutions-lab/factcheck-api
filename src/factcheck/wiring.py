@@ -16,6 +16,7 @@ from factcheck.retrievers import (
     GoogleFactCheckRetriever,
     restcountries_fetcher,
 )
+from factcheck.references import ClaimBuster, ReferenceBundle
 from factcheck.scholarly import ScholarlyBundle
 from factcheck.storage import Store, build_cache, init_db, make_engine, make_session_factory
 from factcheck.types import UsageMeter
@@ -73,7 +74,6 @@ def build_service(settings: Settings):
         providers.append(desearch)
     if settings.google_factcheck_api_key:
         google = GoogleFactCheckRetriever(settings.google_factcheck_api_key)
-        providers.append(google)
     scholarly = ScholarlyBundle(
         openalex_email=settings.openalex_email,
         openalex_api_key=settings.openalex_api_key,
@@ -81,7 +81,9 @@ def build_service(settings: Settings):
         ncbi_email=settings.ncbi_email,
         ncbi_api_key=settings.ncbi_api_key,
     )
-    retriever = CompositeRetriever(providers, scholarly=scholarly) if providers or scholarly else EmptyRetriever()
+    references = ReferenceBundle(email=settings.ncbi_email, google=google)
+    claimbuster = ClaimBuster(settings.claimbuster_api_key) if settings.claimbuster_api_key else None
+    retriever = CompositeRetriever(providers, scholarly=scholarly, references=references)
 
     def google_search(query: str):
         if google is None:
@@ -113,4 +115,5 @@ def build_service(settings: Settings):
         billing=BillingGate(factory, settings),
         url_checker=UrlChecker(timeout=min(12.0, settings.request_timeout_seconds)),
         capital_fetcher=restcountries_fetcher(),
+        claimbuster=claimbuster,
     )

@@ -147,6 +147,7 @@ class VerificationService:
         billing,
         url_checker=None,
         capital_fetcher=None,
+        claimbuster=None,
     ):
         self.settings = settings
         self.extractor = extractor
@@ -160,6 +161,7 @@ class VerificationService:
         self.billing = billing
         self.url_checker = url_checker or UrlChecker(timeout=min(8.0, getattr(settings, "retrieval_timeout_seconds", 8.0)))
         self.capital_fetcher = capital_fetcher
+        self.claimbuster = claimbuster
         self._disconnect = None
         self._meter_lock = __import__("threading").Lock()
 
@@ -236,7 +238,13 @@ class VerificationService:
         if self._disconnected():
             return [self._not_checked(claim, "Not checked: the client disconnected before the check finished.") for claim in extracted]
         deadline = time.monotonic() + float(getattr(self.settings, "request_budget_seconds", 40))
-        order = sorted(range(len(extracted)), key=lambda index: priority(extracted[index]))
+        worthiness: dict[str, float] = {}
+        if getattr(self, "claimbuster", None):
+            try:
+                worthiness = self.claimbuster.scores([claim.text for claim in extracted]) or {}
+            except Exception:  # noqa: BLE001 - scoring is optional and must not stall the check
+                worthiness = {}
+        order = sorted(range(len(extracted)), key=lambda index: priority(extracted[index], worthiness.get(extracted[index].text, 0.0)))
         cap = int(getattr(self.settings, "max_checked_claims", 6))
         selected = order[:cap]
         if len(extracted) > cap:
@@ -400,7 +408,7 @@ class VerificationService:
         focus = " ".join(claim.text for claim in claims)
         crawl_budget = EFFORT_LIMITS[effort]["crawl"]
         resolved = []
-        scholarly = {"openalex", "semantic_scholar", "pubmed", "europepmc"}
+        scholarly = {"openalex", "semantic_scholar", "pubmed", "europepmc", "wikidata", "loc", "google_factcheck"}
         for hit in hits:
             if hit.provider in scholarly and (hit.page_text or hit.snippet):
                 body = hit.page_text or hit.snippet

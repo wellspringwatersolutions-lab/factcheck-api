@@ -243,6 +243,14 @@ def apply_passage_checks(claim_text: str, evidence: Evidence, resolution: UrlRes
             evidence.entailment = "contradicts"
             evidence.quote = conflict
             evidence.used = True
+        if evidence.provider == "wikidata":
+            from factcheck.references import wikidata_date_check
+
+            dated = wikidata_date_check(claim_text, body)
+            if dated:
+                evidence.entailment = dated[0]
+                evidence.quote = dated[1]
+                evidence.used = True
     return evidence
 
 

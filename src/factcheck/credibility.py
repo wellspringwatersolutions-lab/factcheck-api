@@ -126,7 +126,14 @@ def annotate(evidence: Evidence, *, time_sensitive: bool, today: date | None = N
         "pubmed",
         "europepmc",
     }
-    if scholarly:
+    preserved = evidence.source_type in {"fact_checker", "structured", "primary_source"} or evidence.provider in {
+        "google_factcheck",
+        "wikidata",
+        "loc",
+    }
+    if preserved:
+        evidence.grade = evidence.grade or "B"
+    elif scholarly:
         if not evidence.grade or evidence.grade == "E":
             evidence.grade = {"systematic_review": "A", "rct": "B"}.get(evidence.study_type, "B")
         evidence.source_type = "peer_reviewed"

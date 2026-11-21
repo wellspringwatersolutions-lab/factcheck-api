@@ -28,6 +28,9 @@ _SOURCE_TYPE = {
     "expert_opinion": "expert_opinion",
     "eyewitness": "eyewitness",
     "anecdote": "anecdote",
+    "fact_checker": "fact_checker",
+    "structured": "structured",
+    "primary_source": "primary_document",
 }
 
 
