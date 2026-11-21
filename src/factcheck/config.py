@@ -71,9 +71,10 @@ class Settings(BaseSettings):
     max_text_chars: int = 20_000
     max_input_claims: int = 20
     max_output_claims: int = 24
-    max_checked_claims: int = 6
-    check_concurrency: int = 4
-    request_budget_seconds: float = 40
+    max_checked_claims: int = 10
+    check_concurrency: int = 6
+    request_budget_seconds: float = 45
+    long_text_budget_seconds: float = 75
     retrieval_timeout_seconds: float = 8
     stale_after_days: int = 120
     cache_ttl_seconds: int = 86_400

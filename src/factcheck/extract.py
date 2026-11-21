@@ -214,7 +214,41 @@ class LiveExtractor:
             output_tokens=result.output_tokens,
             cost=estimate_cost(self.settings, result.model, result.input_tokens, result.output_tokens),
         )
-        return loads_object(result)
+        try:
+            payload = loads_object(result)
+            if not payload:
+                raise ValueError("empty json")
+            return payload
+        except (ValueError, TypeError):
+            retry = self.client.complete(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": instruction + "\nReturn one JSON object only."},
+                    {"role": "user", "content": user},
+                ],
+                temperature=0.0,
+            )
+            self.meter.add_tokens(
+                model=retry.model,
+                provider=retry.provider,
+                input_tokens=retry.input_tokens,
+                output_tokens=retry.output_tokens,
+                cost=estimate_cost(self.settings, retry.model, retry.input_tokens, retry.output_tokens),
+            )
+            try:
+                payload = loads_object(retry)
+                if payload:
+                    return payload
+            except (ValueError, TypeError):
+                payload = None
+            repaired = re.sub(r",\s*([}\]])", r"\1", retry.content or "")
+            try:
+                payload = loads_object(type(retry)(repaired, retry.input_tokens, retry.output_tokens, retry.model, retry.provider, retry.family))
+            except (ValueError, TypeError):
+                payload = None
+            if not payload:
+                raise ValueError("unrepairable json")
+            return payload
 
     def extract(self, text: str | None, claims: list[str] | None) -> tuple[list[ExtractedClaim], list[str]]:
         sentences = build_sentences(prepare_answer(text) if text else None, [clean_claim_text(claim) for claim in claims] if claims else None)

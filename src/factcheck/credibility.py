@@ -26,6 +26,7 @@ TYPE_WEIGHT = {
     "rct": 0.85,
     "data": 0.84,
     "observational": 0.7,
+    "encyclopedia": 0.75,
     "secondary": 0.5,
     "expert_opinion": 0.4,
     "fact_checker": 0.35,
@@ -46,9 +47,37 @@ T4_WEIGHT = {
 
 _A_HOSTS = {
     "who.int", "cdc.gov", "nih.gov", "nasa.gov", "nature.com", "science.org",
-    "nejm.org", "thelancet.com", "reuters.com", "apnews.com", "bbc.com", "bbc.co.uk",
+    "nejm.org", "thelancet.com",
 }
+# Wire services, public broadcasters, and major national or international outlets. Grade B.
+_MAJOR_OUTLETS = {
+    "apnews.com", "reuters.com", "bbc.com", "bbc.co.uk", "cbc.ca", "cbsnews.com",
+    "nbcnews.com", "abcnews.go.com", "npr.org", "pbs.org", "theguardian.com",
+    "nytimes.com", "washingtonpost.com", "wsj.com", "aljazeera.com", "lemonde.fr",
+    "ft.com", "economist.com", "bloomberg.com", "newsweek.com", "time.com",
+    "usatoday.com", "latimes.com", "theatlantic.com", "dw.com", "france24.com",
+    "abc.net.au", "theglobeandmail.com", "independent.co.uk", "politico.com",
+    "axios.com", "cnn.com", "cnbc.com", "afp.com",
+}
+# Trade and security press, and established think tanks. Grade C.
+_TRADE_AND_TANKS = {
+    "thehackernews.com", "bleepingcomputer.com", "krebsonsecurity.com",
+    "arstechnica.com", "wired.com", "csis.org", "brookings.edu", "cfr.org",
+    "rand.org", "cloudsecurityalliance.org", "delawareonline.com",
+}
+_FACT_CHECKERS = {
+    "snopes.com", "politifact.com", "factcheck.org", "factcheck.afp.com",
+}
+_GOV_HOSTS = {"europa.eu", "ec.europa.eu", "commission.europa.eu", "gov.uk", "msb.se", "dsb.no", "bbk.bund.de"}
 _B_SUFFIXES = (".edu", ".ac.uk")
+_ENCYCLOPEDIAS = (
+    "wikipedia.org",
+    "britannica.com",
+    "encyclopedia.com",
+    "oxfordreference.com",
+    "plato.stanford.edu",
+    "worldhistory.org",
+)
 _B_HOSTS = {
     "nytimes.com", "washingtonpost.com", "theguardian.com", "ft.com", "wsj.com",
     "economist.com", "springer.com", "wiley.com", "ieee.org", "acm.org",
@@ -59,6 +88,24 @@ _D_HOSTS = {"medium.com", "substack.com", "blogspot.com", "wordpress.com", "tumb
 _F_HOSTS = {"reddit.com", "facebook.com", "x.com", "twitter.com", "tiktok.com", "instagram.com", "quora.com", "4chan.org"}
 
 
+def is_encyclopedia(url: str) -> bool:
+    host = hostname(url)
+    return any(host == name or host.endswith("." + name) for name in _ENCYCLOPEDIAS)
+
+
+def _host_is(host: str, names: set[str]) -> bool:
+    return any(host == name or host.endswith("." + name) for name in names)
+
+
+def is_government(url: str) -> bool:
+    host = hostname(url)
+    if not host:
+        return False
+    if host.endswith(".gov") or host.endswith(".gov.uk") or host.endswith(".gouv.fr"):
+        return True
+    return _host_is(host, _GOV_HOSTS)
+
+
 def grade_for(url: str) -> str:
     if url.startswith(("scifact://",)):
         return "A"
@@ -67,10 +114,14 @@ def grade_for(url: str) -> str:
     host = hostname(url)
     if not host:
         return "E"
-    if host.endswith(".gov") or host.endswith(".gov.uk") or host in _A_HOSTS:
+    if is_government(url) or host in _A_HOSTS:
         return "A"
+    if is_encyclopedia(url) or _host_is(host, _MAJOR_OUTLETS) or _host_is(host, _FACT_CHECKERS):
+        return "B"
     if host in _B_HOSTS or host.endswith(_B_SUFFIXES):
         return "B"
+    if _host_is(host, _TRADE_AND_TANKS):
+        return "C"
     if host in _F_HOSTS:
         return "F"
     if host in _D_HOSTS:
@@ -91,7 +142,9 @@ def infer_source_type(url: str, title: str, snippet: str) -> str:
         return "expert_opinion"
     if "i saw" in blob or "eyewitness" in blob:
         return "eyewitness"
-    if host in {"britannica.com"} or "textbook" in blob:
+    if is_encyclopedia(url):
+        return "encyclopedia"
+    if "textbook" in blob:
         return "textbook"
     if host.endswith("data.gov") or host in {"census.gov", "ourworldindata.org"}:
         return "data"
@@ -139,7 +192,12 @@ def annotate(evidence: Evidence, *, time_sensitive: bool, today: date | None = N
         "wikidata",
         "loc",
     }
-    if preserved:
+    if is_encyclopedia(evidence.url) or evidence.provider == "wikipedia":
+        evidence.grade = "B"
+        evidence.source_type = "encyclopedia"
+        if hostname(evidence.url).endswith("wikipedia.org") or evidence.provider == "wikipedia":
+            evidence.origin_id = "wikipedia.org"
+    elif preserved:
         evidence.grade = evidence.grade or "B"
     elif scholarly:
         if not evidence.grade or evidence.grade == "E":

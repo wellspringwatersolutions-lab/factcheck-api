@@ -21,6 +21,7 @@ Flag a verdict that its own quote does not back.
 You may propose a different verdict only by copying a verbatim quote or tool trace that is already in the evidence.
 You may not use your own knowledge. If no such quote exists, leave the verdict Unverified.
 Flag a tldr or summary that overstates or contradicts the claim verdicts, and propose a plainer wording using only those verdicts and quotes.
+In question mode the draft's yes or no, synopsis.answer, the tldr, and the rating must all agree.
 Return JSON {"corrections": [{"claim": "claim text", "to": "Supported|Contradicted|Unverified|Conflicting|Hypothesis", "quote": "verbatim quote or empty", "reason": "short"}], "tldr": "", "summary": ""}"""
 
 
@@ -173,7 +174,7 @@ class TwoPassReview:
 
 def run_review(result: VerificationOut, *, reviewer: TwoPassReview, deadline: float | None, meter) -> None:
     remaining = None if deadline is None else deadline - time.monotonic()
-    if remaining is not None and remaining < 8:
+    if remaining is not None and remaining < 5:
         result.warnings = list(dict.fromkeys([*result.warnings, "review skipped"]))
         result.review = ReviewOut()
         return
@@ -222,6 +223,9 @@ def run_review(result: VerificationOut, *, reviewer: TwoPassReview, deadline: fl
         if original_verdicts.get(claim.text) != claim.verdict
     ]
     result.review = ReviewOut(passes=[reviewer.pass1_model, reviewer.pass2_model], changes=changes, signed_off_by=reviewer.pass2_model)
+    from factcheck.reconcile import reconcile_answer
+
+    reconcile_answer(result)
     _sync_usage(result, meter)
 
 

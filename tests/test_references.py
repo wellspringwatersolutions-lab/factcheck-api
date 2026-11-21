@@ -179,7 +179,7 @@ def test_routing_history_includes_wikidata_and_newspapers_not_medical():
     bundle = ReferenceBundle(email="lab@example.com", google=None)
     history = [item.name for item in bundle.providers_for(["T5"], "Lincoln was shot in 1865")]
     medical = [item.name for item in bundle.providers_for(["T4"], "a randomized vaccine trial in patients")]
-    assert history[:4] == ["wikidata", "loc", "wikipedia", "internet_archive"]
+    assert history[:4] == ["wikidata", "wikipedia", "loc", "internet_archive"]
     assert "nara" not in history
     assert medical == ["crossref"]
     assert "loc" not in medical

@@ -106,6 +106,8 @@ class DraftAnswer(BaseModel):
 
     model: str
     text: str
+    stance: Literal["yes", "no", "partly", "not_enough_evidence"] = "not_enough_evidence"
+    correction: str = ""
 
 
 class SynopsisCounts(BaseModel):
@@ -131,6 +133,7 @@ class SynopsisOut(BaseModel):
     ]
     summary: str
     tldr: str = ""
+    answer: Literal["yes", "no", "partly", "not_enough_evidence"] = "not_enough_evidence"
     caveats: list[str] = Field(default_factory=list)
     unchecked_count: int = 0
     counts: SynopsisCounts = Field(default_factory=SynopsisCounts)

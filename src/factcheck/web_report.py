@@ -120,6 +120,7 @@ def to_check_report(result: VerificationOut, input_text: str) -> dict:
             "rating": "Not enough evidence",
             "summary": "Not enough evidence. No synopsis was stored for this check.",
             "tldr": "There wasn't enough evidence to settle this.",
+            "answer": "not_enough_evidence",
             "caveats": [],
             "unchecked_count": 0,
             "counts": {
@@ -137,13 +138,19 @@ def to_check_report(result: VerificationOut, input_text: str) -> dict:
             "rating": synopsis.rating,
             "summary": synopsis.summary,
             "tldr": synopsis.tldr,
+            "answer": synopsis.answer,
             "caveats": list(synopsis.caveats),
             "unchecked_count": synopsis.unchecked_count,
             "counts": synopsis.counts.model_dump(),
         }
     draft = None
     if result.draft_answer is not None:
-        draft = {"model": result.draft_answer.model, "text": result.draft_answer.text}
+        draft = {
+            "model": result.draft_answer.model,
+            "text": result.draft_answer.text,
+            "stance": result.draft_answer.stance,
+            "correction": result.draft_answer.correction,
+        }
     review = result.review
     review_out = {
         "passes": list(review.passes),

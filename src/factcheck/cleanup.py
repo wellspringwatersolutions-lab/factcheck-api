@@ -15,6 +15,16 @@ _OUTLETS = re.compile(
 )
 _OFFER = re.compile(r"\bwant to (compare|see|know|learn)\b", re.I)
 _YES = re.compile(r"^(yes|no|sure|ok|okay)[.!]?$", re.I)
+_META = re.compile(
+    r"\b(breaks down into|the real goal|key takeaway|in this section|this overview|the situation breaks)\b",
+    re.I,
+)
+_LEAD_LABEL = re.compile(r"^(?:the\s+)?[A-Z][^:]{0,80}:\s+(?=[A-Z])")
+_CITE_TAIL = re.compile(r"\s+\b[A-Z][A-Za-z.'’ ]{1,40}\+\s*\d+\b")
+_CURRENT = re.compile(
+    r"\b(20(?:2[3-9]|3\d)|today|this week|hack(?:ed|ing)?|cyber|stockpile|preparedness|attack)\b",
+    re.I,
+)
 _USER_ROLES = {"user", "human", "you", "question"}
 _TURN = re.compile(
     r"^(?:#{1,3}\s*)?(?:\*\*|__)?\s*"
@@ -157,6 +167,12 @@ def prepare_answer(text: str) -> str:
             if row:
                 kept.append(row)
             continue
+        if line.startswith("#") or (len(line) < 90 and line.endswith(":") and "." not in line):
+            continue
+        if _META.search(line):
+            continue
+        line = _LEAD_LABEL.sub("", line)
+        line = _CITE_TAIL.sub("", line)
         if _SOURCE_LINE.match(line) or _YES.match(line) or _OFFER.search(line) or line.endswith("?"):
             continue
         cleaned = clean_claim_text(line)
@@ -164,6 +180,25 @@ def prepare_answer(text: str) -> str:
             continue
         kept.append(cleaned if cleaned.endswith((".", "!", '"')) else cleaned)
     return "\n".join(kept)
+
+
+def is_current_event(text: str) -> bool:
+    return bool(_CURRENT.search(text or ""))
+
+
+def entity_query(text: str, limit_words: int = 12) -> str:
+    """Names, numbers, and a few topic words. Not the whole sentence."""
+    caps = re.findall(r"\b[A-Z][A-Za-z0-9]+(?:\s+[A-Z][A-Za-z0-9]+)*\b", text or "")
+    numbers = re.findall(r"\b\d+\b", text or "")
+    topics = re.findall(r"\b(?:hack|cyber|stockpile|bases|days|preparedness|attack|EU)\b", text or "", re.I)
+    parts: list[str] = []
+    for piece in [*caps, *numbers, *topics]:
+        if piece.lower() in {"the", "a", "an"} or piece in parts:
+            continue
+        parts.append(piece)
+    if not parts:
+        return focus_query(text, limit_words)
+    return " ".join(parts[:limit_words])[:160]
 
 
 def focus_query(text: str, limit_words: int = 16) -> str:

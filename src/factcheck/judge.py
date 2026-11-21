@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from factcheck.checks import entailment, quote_appears, quantity_conflict, split_passages
+from factcheck.checks import best_passages, entailment, quote_appears, quantity_conflict, split_passages
 from factcheck.llm import loads_object
 from factcheck.textutil import overlap
 from factcheck.types import Evidence, ExtractedClaim, JudgeVote, UsageMeter
@@ -71,7 +71,12 @@ def apply_verified_labels(passages: list[Evidence], votes: list[JudgeVote]) -> l
             passage.used = False
             passage.quote = passage.quote or (passage.snippet or "")[:400]
             continue
-        if passage.provider == "wikidata" and passage.used and passage.entailment in {"entails", "contradicts"} and passage.quote:
+        if (
+            passage.used
+            and passage.entailment in {"entails", "contradicts"}
+            and passage.quote
+            and (passage.provider in {"wikidata", "wikipedia"} or passage.source_type == "encyclopedia")
+        ):
             continue
         if (
             passage.url_status is not None
@@ -175,7 +180,7 @@ class LiveRanker:
             lines.append(f"CLAIM {index}: {claim.text}")
         lines.append("PASSAGES:")
         for item in passages:
-            chunks = split_passages(item.page_text or item.snippet) or [(item.page_text or item.snippet)[:700]]
+            chunks = best_passages(item.page_text or item.snippet, " ".join(claim.text for claim in claims), item.title) or split_passages(item.page_text or item.snippet) or [(item.page_text or item.snippet)[:700]]
             shown = "\n".join(f"  - {chunk}" for chunk in chunks[:4])
             lines.append(f"- url: {item.url}\ntitle: {item.title}\npassages:\n{shown}")
         from factcheck.llm import estimate_cost

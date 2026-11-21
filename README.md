@@ -13,8 +13,8 @@ The product name lives in `src/factcheck/branding.py` as `SERVICE_NAME`.
 `POST /v1/verify` and `POST /check` accept `{"text": "..."}`, `{"claims": ["..."]}`, or `{"question": "..."}`. A short text that is only a question is treated the same as `question`. Both responses add these fields and keep the existing ones:
 
 - `mode`: `"text"` or `"question"`
-- `draft_answer`: `{"model", "text"}` when `mode` is `"question"`, otherwise `null`. The draft is not evidence and has no weight in a verdict.
-- `synopsis`: `{"rating", "tldr", "summary", "caveats", "unchecked_count", "counts"}`. `rating` is one of Accurate, Mostly accurate, Mixed, Mostly inaccurate, Inaccurate, Not enough evidence. It is computed from the claim verdicts and cited quotes. `tldr` is one sentence of at most 30 words, written in the same phrasing call as `summary` and dropped if it adds a fact. `counts` is `{"supported", "contradicted", "conflicting", "unverified", "hypothesis", "opinion", "not_checked"}`. When a cited passage contradicts the draft, `summary` states that quote as the corrected position. A short question without a `?` still counts as a question when it starts with a question word.
+- `draft_answer`: `{"model", "text", "stance", "correction"}` when `mode` is `"question"`, otherwise `null`. `stance` is `yes`, `no`, `partly`, or `not_enough_evidence`. The draft is not evidence. When the evidence contradicts it, `correction` is also prefixed to `text`.
+- `synopsis`: `{"rating", "answer", "tldr", "summary", "caveats", "unchecked_count", "counts"}`. `answer` uses the same four values as `stance`. In question mode the draft, `answer`, `tldr`, and `rating` agree. `rating` is Accurate, Mostly accurate, Mixed, Mostly inaccurate, Inaccurate, or Not enough evidence. `counts` is `{"supported", "contradicted", "conflicting", "unverified", "hypothesis", "opinion", "not_checked"}`.
 - `review`: `{"passes", "changes": [{"claim", "from", "to", "reason"}], "signed_off_by"}`. Qwen proposes corrections and DeepSeek signs off. A correction can cite only a quote or tool trace already in the result. If time is short the review is skipped and `warnings` includes `review skipped`.
 - A failed draft is HTTP 503 `{"error": {"code": "draft_failed", ...}}`. That request is not charged.
 
@@ -50,7 +50,7 @@ Categories change how strict the check is:
 
 A Supported label needs a tool result, a structured fact of record such as a Wikidata date, or two independent sources from the upper part of the evidence scale (studies, the historical record, or an official source). One secondary page, an anecdote, or an eyewitness account stays Unverified. The API value stays `Contradicted` when the best evidence goes against the claim. Conflicting means credible sources disagree. There is no numeric score for the whole answer.
 
-Keyless history and reference sources, besides Wikidata and Chronicling America: Wikipedia (secondary, one shared origin), Crossref (mailto, no key), the Internet Archive and Wayback Machine, and GDELT DOC 2.0 for recent news. OpenAlex sends a mailto. Semantic Scholar works without a key and backs off once on HTTP 429.
+Wikipedia, Britannica, and the other established encyclopedias are graded B, as a tertiary reference. One of them is enough for a fact of record (an office, a date, a role, or a well-documented event), and every Wikipedia page counts as the same source. A claim that someone was not a criminal is supported when those sources describe the person in non-criminal terms and no conviction or charge is in the record. Wikidata is retried once; if it is down, the Wikipedia lead sentence is used instead. Archive.org, GDELT, and Chronicling America are skipped for those well-documented facts so the check stays inside the time budget. OpenAlex sends a mailto. Semantic Scholar works without a key and backs off once on HTTP 429.
 
 Numbers, dates, exact quotes, citations, and anything time-sensitive get a stricter retrieval pass. Cited URLs are fetched, quoted text has to appear on the page (exact or fuzzy), and the page body is hashed for the audit trail. A dead URL or a quote that is not on the page cannot support a claim.
 
@@ -70,6 +70,8 @@ python -m factcheck.cli serve --port 8741
 ```
 
 With no API keys the service still runs. Math is recomputed locally. Fact claims come back Unverified until a retriever can fetch a page. SQLite (`./data/factcheck.db`) and an in-memory cache are the defaults, so Postgres and Redis are optional.
+
+A normal check aims to finish within about 45 seconds, including the two-pass review. A pasted answer longer than 3,500 characters is allowed 75 seconds. The website that calls `/check` should wait at least 75 seconds before aborting the request.
 
 Open `http://127.0.0.1:8741/health`. Interactive API docs are at `/docs`.
 

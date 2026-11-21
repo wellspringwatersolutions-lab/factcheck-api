@@ -97,6 +97,74 @@ def test_loc_skips_office_facts_and_post_1963():
     assert "loc" in lincoln
 
 
+def test_wikipedia_is_a_reliable_tertiary_source_and_absence_supports_not_a_criminal():
+    from factcheck.aggregate import decide
+    from factcheck.credibility import annotate
+
+    lead = "John Adams was a Founding Father and the second president of the United States from 1797 to 1801."
+    page = Evidence(
+        url="https://en.wikipedia.org/wiki/John_Adams",
+        title="John Adams",
+        snippet=lead,
+        page_text=lead,
+        quote=lead,
+        entailment="entails",
+        used=True,
+        provider="desearch",
+        grade="E",
+        source_type="secondary",
+    )
+    annotate(page, time_sensitive=False)
+    assert page.grade == "B"
+    assert page.source_type == "encyclopedia"
+    assert page.origin_id == "wikipedia.org"
+    other = Evidence(
+        url="https://en.wikipedia.org/wiki/Presidency_of_John_Adams",
+        title="Presidency",
+        snippet=lead,
+        page_text=lead,
+        provider="desearch",
+    )
+    annotate(other, time_sensitive=False)
+    assert other.origin_id == page.origin_id
+    decision = decide([page], category="T5", claim_text="John Adams was not a criminal.")
+    assert decision.verdict == "Supported"
+    assert "absence of evidence for criminality" in decision.reasoning
+    office = decide([page], category="T5", claim_text="John Adams was the second president of the United States.")
+    assert office.verdict == "Supported"
+
+
+def test_wikidata_retries_a_502_then_uses_wikipedia_when_it_stays_down():
+    calls = {"wiki": 0, "wd": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "query.wikidata.org":
+            calls["wd"] += 1
+            return httpx.Response(502, text="bad gateway")
+        calls["wiki"] += 1
+        if request.url.params.get("list") == "search":
+            return httpx.Response(200, json={"query": {"search": [{"title": "John Adams"}]}})
+        return httpx.Response(
+            200,
+            json={"query": {"pages": [{"extract": "John Adams was the second president of the United States from 1797 to 1801."}]}},
+        )
+
+    hits = WikidataRetriever("lab@example.com", client=httpx.Client(transport=httpx.MockTransport(handler)), min_interval=0).search(
+        "John Adams"
+    )
+    assert calls["wd"] == 2
+    assert hits[0].provider == "wikipedia"
+    assert hits[0].origin_id == "wikipedia.org"
+    assert "second president" in hits[0].page_text
+
+
+def test_well_documented_facts_skip_the_slow_archives():
+    bundle = ReferenceBundle(email="lab@example.com")
+    names = [item.name for item in bundle.providers_for(["T5"], "was john adams a criminal")]
+    assert names == ["wikidata", "wikipedia"]
+    assert "loc" not in names and "internet_archive" not in names and "gdelt" not in names
+
+
 def test_fetcher_sends_a_user_agent_uses_wikipedia_api_and_keeps_a_snippet_after_403():
     seen = []
 

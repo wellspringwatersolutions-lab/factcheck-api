@@ -5,9 +5,10 @@ Judges may rank or filter evidence. They cannot create a Supported verdict.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
-from factcheck.credibility import source_weight
+from factcheck.credibility import is_encyclopedia, source_weight
 from factcheck.textutil import hostname
 from factcheck.types import Evidence
 
@@ -36,12 +37,23 @@ _UPPER = {
     "rct",
     "observational",
     "textbook",
+    "encyclopedia",
     "primary",
     "primary_source",
     "data",
     "peer_reviewed",
     "structured",
 }
+_RECORD_CLAIM = re.compile(
+    r"\b(president|office|born|birth|died|death|general|commander|king|queen|founded|ordinal)\b",
+    re.I,
+)
+_NEGATIVE_CRIME = re.compile(
+    r"\b(not a criminal|never charged|never convicted|no criminal|was not charged|was not a criminal|wasn't a criminal)\b",
+    re.I,
+)
+_GUILT = re.compile(r"\b(convicted|was charged|found guilty|pleaded guilty|criminal charge)\b", re.I)
+_ROLE_WORDS = re.compile(r"\b(president|father|general|born|office|statesman|minister|commander)\b", re.I)
 _WEAK = {"eyewitness", "anecdote", "syndicated", "fact_checker"}
 
 
@@ -109,6 +121,58 @@ def _strength(passages: list[Evidence], *, category: str, verdict: str, origins:
     return round(min(0.95, max(0.0, base)), 3)
 
 
+def _biographical_sentence(text: str) -> str:
+    parts = [part.strip() for part in re.split(r"(?<=[.!?])\s+", text or "") if part.strip()]
+    for part in parts:
+        if _ROLE_WORDS.search(part) and not _GUILT.search(part):
+            return part
+    return parts[0] if parts else ""
+
+
+_CURRENT = re.compile(
+    r"\b(20(?:2[3-9]|3\d)|today|this week|hack(?:ed|ing)?|cyber|stockpile|preparedness|attack)\b",
+    re.I,
+)
+_DATELINE = re.compile(r"^(published|updated|posted)\b", re.I)
+
+
+def _current_event(text: str) -> bool:
+    return bool(_CURRENT.search(text or ""))
+
+
+def _body_quote(passage: Evidence) -> bool:
+    quote = (passage.quote or "").strip()
+    if len(quote) < 40 or _DATELINE.match(quote):
+        return False
+    title = " ".join((passage.title or "").lower().split())
+    return " ".join(quote.lower().split()) != title
+
+
+def _two_reliable_news(passages: list[Evidence]) -> bool:
+    origins = {
+        passage.origin_id or hostname(passage.url)
+        for passage in passages
+        if passage.grade in {"A", "B"} and _body_quote(passage)
+    }
+    origins.discard("")
+    return len(origins) >= 2
+
+
+def criminality_absence(claim_text: str, passages: list[Evidence]) -> Evidence | None:
+    """A reliable biography with no charge or conviction supports 'was not a criminal'."""
+    if not _NEGATIVE_CRIME.search(claim_text or ""):
+        return None
+    record = " ".join((item.page_text or item.snippet or "") for item in passages)
+    if _GUILT.search(record):
+        return None
+    for item in passages:
+        reliable = item.source_type == "encyclopedia" or item.provider in {"wikipedia", "wikidata"} or item.grade in {"A", "B"}
+        text = item.page_text or item.snippet or ""
+        if reliable and _ROLE_WORDS.search(text) and not _GUILT.search(text):
+            return item
+    return None
+
+
 def decide(
     passages: list[Evidence],
     *,
@@ -116,6 +180,7 @@ def decide(
     hypothesis: bool = False,
     high_stakes: bool = False,
     tool: dict | None = None,
+    claim_text: str = "",
     judge_votes_ignored: bool = True,
 ) -> Decision:
     """Decide from evidence. `judge_votes_ignored` documents that votes are not an input."""
@@ -196,6 +261,25 @@ def decide(
             would_settle=settle,
         )
 
+    absence = None if contradicting else criminality_absence(claim_text, passages)
+    if absence is not None:
+        quote = _biographical_sentence(absence.page_text or absence.snippet or absence.quote)
+        if quote:
+            absence.quote = quote
+            absence.used = True
+            absence.entailment = "entails"
+            return Decision(
+                verdict="Supported",
+                strength_of_support=0.62,
+                reasoning=(
+                    "Supported by absence of evidence for criminality. "
+                    "A reliable source describes the person in non-criminal terms and the record "
+                    f"shows no conviction or criminal charge. {quote} {STRENGTH_NOTE}"
+                ),
+                needs_human_review=False,
+                supporting_quotes=[quote],
+            )
+
     if not supporting and not contradicting:
         return Decision(
             verdict="Unverified",
@@ -219,17 +303,33 @@ def decide(
 
     if supporting and not contradicting:
         upper = [item for item in supporting if on_upper_scale(item)]
-        records = [item for item in supporting if fact_of_record(item)]
+        records = [
+            item
+            for item in supporting
+            if fact_of_record(item) or (item.source_type == "encyclopedia" and _RECORD_CLAIM.search(claim_text or ""))
+        ]
         if records:
+            kind = "An encyclopedia" if records[0].source_type == "encyclopedia" else "A structured fact of record"
             return Decision(
                 verdict="Supported",
                 strength_of_support=max(0.7, _strength(records, category=category, verdict="Supported", origins=len(records))),
                 reasoning=(
-                    "A structured fact of record quotes a passage that matches the claim. "
+                    f"{kind} quotes a passage that matches the claim. "
                     + STRENGTH_NOTE
                 ),
                 needs_human_review=high_stakes,
                 supporting_quotes=[item.quote for item in records if item.quote],
+            )
+        if _current_event(claim_text) and _two_reliable_news(supporting):
+            return Decision(
+                verdict="Supported",
+                strength_of_support=max(0.7, _strength(supporting, category=category, verdict="Supported", origins=2)),
+                reasoning=(
+                    "Two independent major outlets quote passages that line up with this current-events claim. "
+                    + STRENGTH_NOTE
+                ),
+                needs_human_review=high_stakes,
+                supporting_quotes=[item.quote for item in supporting if item.quote][:3],
             )
         if len(upper) >= 2:
             return Decision(

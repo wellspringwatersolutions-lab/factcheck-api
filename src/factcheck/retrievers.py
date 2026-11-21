@@ -36,9 +36,16 @@ class DesearchRetriever:
         return {"Authorization": self.api_key}
 
     def search(self, query: str, *, limit: int = 6) -> list[Evidence]:
+        from factcheck.cleanup import entity_query, is_current_event
+
+        recent = is_current_event(query)
+        path = "/news" if recent else "/web"
+        params = {"query": entity_query(query) if recent else query, "start": 0}
+        if recent:
+            params["time"] = "week"
         response = self.client.get(
-            f"{self.base_url}/web",
-            params={"query": query, "start": 0},
+            f"{self.base_url}{path}",
+            params=params,
             headers=self._headers(),
         )
         response.raise_for_status()

@@ -129,7 +129,7 @@ def build_service(settings: Settings):
         store=Store(factory),
         cache=build_cache(settings),
         billing=BillingGate(factory, settings),
-        url_checker=UrlChecker(timeout=min(12.0, settings.request_timeout_seconds), email=settings.ncbi_email),
+        url_checker=UrlChecker(timeout=4.0, email=settings.ncbi_email),
         capital_fetcher=restcountries_fetcher(),
         claimbuster=claimbuster,
         drafter=drafter,

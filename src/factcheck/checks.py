@@ -222,6 +222,31 @@ def quantity_conflict(claim: str, passage: str) -> str | None:
     return None
 
 
+_CHROME = re.compile(
+    r"^(published|updated|posted|by|share|subscribe|sign in|cookie|advertisement|all rights reserved)\b",
+    re.I,
+)
+
+
+def best_passages(page: str, claim: str, title: str = "", limit: int = 3) -> list[str]:
+    """The passages that actually discuss the claim, not the title or a dateline."""
+    cleaned = clean_html(page or "")
+    chunks = [part.strip() for part in re.split(r"\n+|(?<=[.!?])\s+", cleaned) if part.strip()]
+    title_key = " ".join((title or "").lower().split())
+    scored: list[tuple[float, str]] = []
+    for chunk in chunks:
+        if len(chunk) < 40 or _CHROME.match(chunk):
+            continue
+        if title_key and " ".join(chunk.lower().split()) == title_key:
+            continue
+        score = overlap(claim, chunk)
+        if score <= 0:
+            continue
+        scored.append((score, chunk[:700]))
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return [chunk for _, chunk in scored[:limit]]
+
+
 def split_passages(text: str, limit: int = 6) -> list[str]:
     cleaned = clean_html(text or "")
     parts = [part.strip() for part in re.split(r"\n+|(?<=[.!?])\s+", cleaned) if part.strip()]
@@ -246,7 +271,8 @@ def apply_passage_checks(claim_text: str, evidence: Evidence, resolution: UrlRes
     if snippet and snippet not in raw:
         raw = f"{raw}\n{snippet}".strip()
     body = clean_html(raw)
-    evidence.page_text = body
+    chosen = best_passages(body, claim_text, evidence.title, limit=3)
+    evidence.page_text = "\n".join(chosen) if chosen else body
     evidence.content_sha256 = content_hash(body or raw)
     evidence.url_status = resolution.status
     evidence.quote = ""
@@ -265,10 +291,16 @@ def apply_passage_checks(claim_text: str, evidence: Evidence, resolution: UrlRes
             evidence.entailment = "contradicts"
             evidence.quote = conflict
             evidence.used = True
-        if evidence.provider == "wikidata":
-            from factcheck.references import wikidata_date_check, wikidata_office_check
+        from factcheck.credibility import is_encyclopedia
 
-            dated = wikidata_date_check(claim_text, body) or wikidata_office_check(claim_text, body)
+        if evidence.provider in {"wikidata", "wikipedia"} or is_encyclopedia(evidence.url):
+            from factcheck.references import encyclopedia_role_check, wikidata_date_check, wikidata_office_check
+
+            dated = None
+            if evidence.provider == "wikidata":
+                dated = wikidata_date_check(claim_text, body) or wikidata_office_check(claim_text, body)
+            if dated is None:
+                dated = encyclopedia_role_check(claim_text, body)
             if dated:
                 evidence.entailment = dated[0]
                 evidence.quote = dated[1]

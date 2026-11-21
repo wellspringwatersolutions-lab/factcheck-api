@@ -351,10 +351,25 @@ def build_synopsis(
             tldr = tldr_text.strip()
             if tldr[-1] not in ".!?":
                 tldr += "."
+    from factcheck.reconcile import answer_for_rating
+
+    supported_texts = [claim.text for claim in claims if claim.verdict == "Supported"]
+    direct = _direct(question, supported_texts)
+    negatives = [text for text in supported_texts if _NEGATION.search(text)]
+    if rating in {"Accurate", "Mostly accurate"} and question and _YESNO.match(question.strip()):
+        if negatives and (direct == "No" or len(negatives) < len(supported_texts)):
+            answer = "no"
+        elif direct == "Yes" or (supported_texts and not negatives):
+            answer = "yes"
+        else:
+            answer = answer_for_rating(rating)
+    else:
+        answer = answer_for_rating(rating)
     return SynopsisOut(
         rating=rating,
         summary=summary,
         tldr=tldr,
+        answer=answer,
         caveats=caveats,
         unchecked_count=unchecked_count,
         counts=counts,

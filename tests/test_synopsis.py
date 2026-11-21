@@ -37,7 +37,8 @@ WASHINGTON = [
 
 def test_synopsis_shape_includes_the_caveat():
     synopsis = build_synopsis(WASHINGTON, question="Was George Washington a criminal?")
-    assert set(synopsis.model_dump()) == {"rating", "summary", "tldr", "caveats", "unchecked_count", "counts"}
+    assert set(synopsis.model_dump()) == {"rating", "answer", "summary", "tldr", "caveats", "unchecked_count", "counts"}
+    assert synopsis.answer == "no"
     assert synopsis.rating == "Mostly accurate"
     assert synopsis.summary.startswith("Mostly accurate")
     assert "never charged" in synopsis.summary.lower()
@@ -205,8 +206,9 @@ def test_bare_question_detection():
 def test_drafter_parses_the_json_answer():
     scripted = ScriptedLLM(['{"answer": "Canberra is the capital of Australia."}'])
     drafter = AnswerDrafter(scripted, "deepseek-ai/DeepSeek-V3.2-TEE", UsageMeter(), settings())
-    model, text = drafter("What is the capital of Australia?")
+    model, text, stance = drafter("What is the capital of Australia?")
     assert text == "Canberra is the capital of Australia."
+    assert stance == "not_enough_evidence"
     assert model
     broken = AnswerDrafter(ScriptedLLM(["not json"]), "deepseek-ai/DeepSeek-V3.2-TEE", UsageMeter(), settings())
     try:
@@ -229,7 +231,10 @@ def test_draft_is_not_evidence_when_nothing_is_retrieved():
     )
     assert result.mode == "question"
     assert result.draft_answer.model == "mock-draft"
-    assert result.draft_answer.text == "The Eiffel Tower is in Berlin."
+    assert result.draft_answer.text.startswith("Unconfirmed:")
+    assert "Berlin" in result.draft_answer.text
+    assert result.synopsis.answer == "not_enough_evidence"
+    assert result.draft_answer.stance == "not_enough_evidence"
     assert any("Berlin" in claim.text for claim in result.claims)
     assert all("?" not in claim.text for claim in result.claims)
     assert all(claim.verdict != "Supported" for claim in result.claims)
@@ -249,9 +254,12 @@ def test_contradiction_synopsis_states_the_cited_correction():
     service.drafter = lambda question: ("mock-draft", "Mount Everest is 6500 m tall.")
     result = service.verify(text="How tall is Mount Everest?", claims=None, client=client(), charge=False)
     assert result.mode == "question"
-    assert result.draft_answer.text == "Mount Everest is 6500 m tall."
+    assert result.draft_answer.text.lower().startswith("correction:")
+    assert "6500" in result.draft_answer.text
+    assert result.draft_answer.correction
     assert result.claims[0].verdict == "Contradicted"
-    assert result.synopsis.rating in {"Inaccurate", "Mostly inaccurate", "Not enough evidence"}
+    assert result.synopsis.answer == "partly"
+    assert result.synopsis.rating == "Mixed"
     assert "8849" in result.synopsis.summary
     assert "cited evidence" in result.synopsis.summary.lower()
     assert "6500" not in result.synopsis.summary
@@ -281,7 +289,7 @@ def test_failed_draft_returns_503_and_does_not_spend_the_free_check():
         body = ok.json()
         assert body["mode"] == "text"
         assert body["draft_answer"] is None
-        assert set(body["synopsis"]) == {"rating", "summary", "tldr", "caveats", "unchecked_count", "counts"}
+        assert set(body["synopsis"]) == {"rating", "answer", "summary", "tldr", "caveats", "unchecked_count", "counts"}
         assert body["synopsis"]["rating"] == "Accurate"
         assert body["synopsis"]["tldr"]
         assert body["synopsis"]["counts"]["supported"] == 1

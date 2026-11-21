@@ -40,6 +40,14 @@ from factcheck.types import Evidence, ExtractedClaim, UsageMeter
 logger = logging.getLogger("factcheck")
 
 
+def request_budget(settings, text: str | None) -> float:
+    """Long pasted answers get 75 seconds. Everything else stays near 45 so the review can run."""
+    budget = float(getattr(settings, "request_budget_seconds", 45))
+    if text and len(text) > 3500:
+        budget = max(budget, float(getattr(settings, "long_text_budget_seconds", 75)))
+    return budget
+
+
 def _labels_disagree(left, right) -> bool:
     urls = set(left.stances) | set(right.stances)
     for url in urls:
@@ -198,7 +206,9 @@ class VerificationService:
         for helper in (self.drafter, self.synopsizer):
             if helper is not None and hasattr(helper, "meter"):
                 helper.meter = meter
-        deadline = time.monotonic() + float(getattr(self.settings, "request_budget_seconds", 40))
+        budget = request_budget(self.settings, text)
+        deadline = time.monotonic() + budget
+        self._deadline = deadline
         try:
             warnings: list[str] = []
             mode = "text"
@@ -210,8 +220,8 @@ class VerificationService:
             if preclassified is None and not claims and (question or is_bare_question(text)):
                 mode = "question"
                 asked = (question or text or "").strip()
-                model_name, drafted = self._draft(asked)
-                draft_answer = DraftAnswer(model=model_name, text=drafted)
+                model_name, drafted, stance = self._draft(asked)
+                draft_answer = DraftAnswer(model=model_name, text=drafted, stance=stance)
                 self._draft_text = drafted
                 check_text = drafted
                 check_claims = None
@@ -242,6 +252,9 @@ class VerificationService:
                 from factcheck.review import run_review
 
                 run_review(payload, reviewer=self.reviewer, deadline=deadline, meter=meter)
+            from factcheck.reconcile import reconcile_answer
+
+            reconcile_answer(payload)
             if payload.usage.tier == "owner":
                 logger.info("verification %s tier=owner ip=%s", payload.verification_id, getattr(client, "ip", ""))
             self.store.save(payload, fingerprint=getattr(client, "fingerprint", None), tier=payload.usage.tier, api_key_id=getattr(reservation, "api_key_id", None))
@@ -278,7 +291,9 @@ class VerificationService:
             checked_at=datetime.now(timezone.utc).isoformat(),
         )
 
-    def _draft(self, question: str) -> tuple[str, str]:
+    def _draft(self, question: str) -> tuple[str, str, str]:
+        from factcheck.questions import parse_stance
+
         if self.drafter is None:
             raise DraftError("No language model is configured, so a question cannot be drafted.")
         try:
@@ -287,13 +302,14 @@ class VerificationService:
             raise
         except Exception as exc:  # noqa: BLE001 - the caller gets one clean error, not a stack trace
             raise DraftError("The draft answer could not be written, so nothing was checked.") from exc
-        if not isinstance(drafted, tuple) or len(drafted) != 2:
+        if not isinstance(drafted, tuple) or len(drafted) not in {2, 3}:
             raise DraftError("The draft answer could not be written, so nothing was checked.")
-        model_name, text = drafted
+        model_name, text = drafted[0], drafted[1]
+        stance = drafted[2] if len(drafted) == 3 else parse_stance("", text)
         text = (text or "").strip()
         if not text:
             raise DraftError("The draft answer was empty, so nothing was checked.")
-        return str(model_name or "unknown"), text
+        return str(model_name or "unknown"), text, parse_stance(stance, text)
 
     def _run(self, extracted: list[ExtractedClaim], meter: UsageMeter, warnings: list[str], deadline: float | None = None) -> list[ClaimOut]:
         self._cost_mark = getattr(self.retriever, "cost_usd", 0.0)
@@ -417,7 +433,10 @@ class VerificationService:
     def _evidence_cluster(self, extracted, indexes, results, effort, meter, warnings) -> None:
         claims = [extracted[index] for index in indexes]
         limit = EFFORT_LIMITS[effort]["search"]
-        query = focus_query(" ".join(claim.text for claim in claims))
+        from factcheck.cleanup import entity_query, is_current_event
+
+        raw_query = " ".join(claim.text for claim in claims)
+        query = entity_query(raw_query) if is_current_event(raw_query) else focus_query(raw_query)
         scientific = any(claim.scientific or claim.claim_category in {"T2", "T3", "T4"} for claim in claims)
         categories = [claim.claim_category for claim in claims]
         before = getattr(self.retriever, "cost_usd", 0.0)
@@ -451,6 +470,7 @@ class VerificationService:
                 hypothesis=claim.hypothesis or effort == "hypothesis",
                 high_stakes=claim.claim_category in {"T4", "T7"} or claim.time_sensitive,
                 tool=tool,
+                claim_text=claim.text,
             )
             checks = passage_check_rows(claim.text, chosen)
             if any(not row["passed"] for row in checks):
@@ -474,8 +494,26 @@ class VerificationService:
         focus = " ".join(claim.text for claim in claims)
         crawl_budget = EFFORT_LIMITS[effort]["crawl"]
         resolved = []
-        scholarly = {"openalex", "semantic_scholar", "pubmed", "europepmc", "wikidata", "loc", "google_factcheck"}
+        scholarly = {"openalex", "semantic_scholar", "pubmed", "europepmc", "wikidata", "loc", "google_factcheck", "wikipedia"}
+        deadline = getattr(self, "_deadline", None)
+        fetched = 0
         for hit in hits:
+            if deadline is not None and time.monotonic() > deadline - 12:
+                from factcheck.checks import UrlResolution, content_hash
+
+                snippet = hit.page_text or hit.snippet or ""
+                resolution = UrlResolution(hit.url, bool(snippet), 200 if snippet else None, hit.url, snippet, content_hash(snippet))
+                apply_passage_checks(focus, hit, resolution)
+                resolved.append(hit)
+                continue
+            if fetched >= 4 and hit.provider not in scholarly:
+                from factcheck.checks import UrlResolution, content_hash
+
+                snippet = hit.page_text or hit.snippet or ""
+                resolution = UrlResolution(hit.url, bool(snippet), 200 if snippet else None, hit.url, snippet, content_hash(snippet))
+                apply_passage_checks(focus, hit, resolution)
+                resolved.append(hit)
+                continue
             if hit.provider in scholarly and (hit.page_text or hit.snippet):
                 body = hit.page_text or hit.snippet
                 from factcheck.checks import UrlResolution, content_hash
@@ -483,6 +521,7 @@ class VerificationService:
                 resolution = UrlResolution(hit.url, True, 200, hit.url, body, content_hash(body))
             else:
                 resolution = self.url_checker.resolve(hit.url, body=hit.snippet)
+                fetched += 1
             if resolution.ok and len(resolution.body) < 80 and crawl_budget > 0 and hasattr(self.retriever, "enrich"):
                 extra = self.retriever.enrich(hit)
                 if extra:
