@@ -11,7 +11,7 @@ from factcheck.credibility import source_weight
 from factcheck.textutil import hostname
 from factcheck.types import Evidence
 
-RULES_VERSION = "3"
+RULES_VERSION = "4"
 
 STRENGTH_NOTE = (
     "Strength of support is based on the evidence: source grade, how many independent "
@@ -28,10 +28,40 @@ class Decision:
     hypothesis_status: str | None = None
     supporting_quotes: list[str] = field(default_factory=list)
     contradicting_quotes: list[str] = field(default_factory=list)
+    would_settle: str = ""
+
+
+_UPPER = {
+    "systematic_review",
+    "rct",
+    "observational",
+    "textbook",
+    "primary",
+    "primary_source",
+    "data",
+    "peer_reviewed",
+    "structured",
+}
+_WEAK = {"eyewitness", "anecdote", "syndicated", "fact_checker"}
+
+
+def fact_of_record(passage: Evidence) -> bool:
+    """A structured record such as a Wikidata date can support a simple claim on its own."""
+    return passage.provider == "wikidata" or (passage.source_type == "structured" and passage.grade in {"A", "B"})
+
+
+def on_upper_scale(passage: Evidence) -> bool:
+    """Math through expert/official testimony. Eyewitness and anecdote are below the line."""
+    if passage.source_type in _WEAK:
+        return False
+    if passage.source_type in _UPPER:
+        return True
+    host = hostname(passage.url)
+    return host.endswith(".gov") or host.endswith(".gov.uk") or host.endswith(".edu") or host.endswith(".ac.uk")
 
 
 def is_authoritative(passage: Evidence) -> bool:
-    """One peer-reviewed, official, or encyclopedic source can carry a claim."""
+    """Kept for callers. A Supported label no longer follows from this alone."""
     host = hostname(passage.url)
     if passage.source_type in {"peer_reviewed", "structured"} and passage.grade in {"A", "B"}:
         return True
@@ -145,18 +175,25 @@ def decide(
         else:
             status = "untested"
             review = False
+        settle = (
+            "A quoted passage from an independent source, or a tool result, that directly "
+            "confirms or refutes the claim as written would settle it. Until then it is not a fact."
+        )
         return Decision(
             verdict="Hypothesis",
             strength_of_support=_strength(supporting + contradicting, category=category, verdict="Hypothesis", origins=len(supporting) + len(contradicting)),
             reasoning=(
                 f"This is a hypothesis ({status.replace('_', ' ')}). "
                 "It is not a true or false verdict. "
+                + settle
+                + " "
                 + STRENGTH_NOTE
             ),
             needs_human_review=review,
             hypothesis_status=status,
             supporting_quotes=support_quotes,
             contradicting_quotes=contradict_quotes,
+            would_settle=settle,
         )
 
     if not supporting and not contradicting:
@@ -181,39 +218,52 @@ def decide(
         )
 
     if supporting and not contradicting:
-        if len(supporting) >= 2:
+        upper = [item for item in supporting if on_upper_scale(item)]
+        records = [item for item in supporting if fact_of_record(item)]
+        if records:
             return Decision(
                 verdict="Supported",
-                strength_of_support=max(0.72, _strength(supporting, category=category, verdict="Supported", origins=len(supporting))),
+                strength_of_support=max(0.7, _strength(records, category=category, verdict="Supported", origins=len(records))),
                 reasoning=(
-                    f"{len(supporting)} independent sources contain passages that line up with the claim. "
-                    "The quotes are in the report. " + STRENGTH_NOTE
+                    "A structured fact of record quotes a passage that matches the claim. "
+                    + STRENGTH_NOTE
                 ),
                 needs_human_review=high_stakes,
-                supporting_quotes=support_quotes,
+                supporting_quotes=[item.quote for item in records if item.quote],
             )
-        if is_authoritative(supporting[0]):
+        if len(upper) >= 2:
             return Decision(
                 verdict="Supported",
-                strength_of_support=0.55,
+                strength_of_support=max(0.72, _strength(upper, category=category, verdict="Supported", origins=len(upper))),
                 reasoning=(
-                    "One authoritative source contains a passage that lines up with the claim. "
-                    "A second independent source would raise the strength of support. " + STRENGTH_NOTE
+                    f"{len(upper)} independent sources from the upper part of the evidence scale "
+                    "contain passages that line up with the claim. The quotes are in the report. "
+                    + STRENGTH_NOTE
                 ),
                 needs_human_review=high_stakes,
-                supporting_quotes=support_quotes,
+                supporting_quotes=[item.quote for item in upper if item.quote],
             )
         return Decision(
-            verdict="Unsupported",
-            strength_of_support=_strength(supporting, category=category, verdict="Unsupported", origins=1),
+            verdict="Unverified",
+            strength_of_support=min(0.35, _strength(supporting, category=category, verdict="Unverified", origins=len(supporting))),
             reasoning=(
-                "One passage lines up with the claim, and it is not an authoritative source. "
-                "That is not enough to call the claim supported. " + STRENGTH_NOTE
+                "A passage was found, but it is not enough to confirm the claim. "
+                "Anecdote, a single source, or a source below the historical and official record "
+                "is not rounded up to supported. " + STRENGTH_NOTE
             ),
             needs_human_review=True,
             supporting_quotes=support_quotes,
         )
 
+    credible_against = [item for item in contradicting if item.source_type not in {"anecdote", "eyewitness", "syndicated"}]
+    if not credible_against:
+        return Decision(
+            verdict="Unverified",
+            strength_of_support=0.15,
+            reasoning="The only passage against the claim is too weak to treat the claim as false. " + STRENGTH_NOTE,
+            needs_human_review=high_stakes,
+            contradicting_quotes=contradict_quotes,
+        )
     return Decision(
         verdict="Contradicted",
         strength_of_support=_strength(contradicting, category=category, verdict="Contradicted", origins=len(contradicting)),

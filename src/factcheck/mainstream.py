@@ -101,7 +101,10 @@ def build_result(checks: list[OutletCheck]) -> MainstreamResult:
     label = consensus(chosen)
     clear = sum(1 for item in chosen if item.polarity != "unclear")
     if not chosen:
-        detail = "No matching write-ups were found at the outlets checked."
+        detail = (
+            "No mainstream fact-checker covered this. Snopes, PolitiFact, FactCheck.org, "
+            "AP Fact Check, and Reuters Fact Check had no matching write-up."
+        )
     else:
         detail = "; ".join(f"{item.outlet}: {item.rating}" for item in chosen)
     reasoning = (

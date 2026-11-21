@@ -17,6 +17,7 @@ from factcheck.retrievers import (
     restcountries_fetcher,
 )
 from factcheck.questions import AnswerDrafter
+from factcheck.review import TwoPassReview
 from factcheck.references import ClaimBuster, ReferenceBundle
 from factcheck.synopsis import LLMSynopsis
 from factcheck.scholarly import ScholarlyBundle
@@ -57,6 +58,7 @@ def build_service(settings: Settings):
     client = None if settings.llm_mode == "mock" else build_llm(settings)
     drafter = None
     synopsizer = None
+    reviewer = None
     if settings.llm_mode == "auto" and client is None:
         pass
     if client is None:
@@ -71,6 +73,7 @@ def build_service(settings: Settings):
         ranker_tie = LiveRanker(client, "tie", settings.tiebreak_model, meter, settings)
         drafter = AnswerDrafter(client, settings.extract_model, meter, settings)
         synopsizer = LLMSynopsis(client, settings.extract_model, meter, settings)
+        reviewer = TwoPassReview(client, settings, meter)
 
     providers = []
     desearch = None
@@ -81,13 +84,20 @@ def build_service(settings: Settings):
     if settings.google_factcheck_api_key:
         google = GoogleFactCheckRetriever(settings.google_factcheck_api_key)
     scholarly = ScholarlyBundle(
-        openalex_email=settings.openalex_email,
+        openalex_email=settings.openalex_email or settings.ncbi_email,
         openalex_api_key=settings.openalex_api_key,
         semantic_scholar_api_key=settings.semantic_scholar_api_key,
         ncbi_email=settings.ncbi_email,
         ncbi_api_key=settings.ncbi_api_key,
     )
-    references = ReferenceBundle(email=settings.ncbi_email, google=google)
+    references = ReferenceBundle(
+        email=settings.ncbi_email,
+        google=google,
+        nara_api_key=settings.nara_api_key,
+        smithsonian_api_key=settings.smithsonian_api_key,
+        dpla_api_key=settings.dpla_api_key,
+        europeana_api_key=settings.europeana_api_key,
+    )
     claimbuster = ClaimBuster(settings.claimbuster_api_key) if settings.claimbuster_api_key else None
     retriever = CompositeRetriever(providers, scholarly=scholarly, references=references)
 
@@ -119,9 +129,10 @@ def build_service(settings: Settings):
         store=Store(factory),
         cache=build_cache(settings),
         billing=BillingGate(factory, settings),
-        url_checker=UrlChecker(timeout=min(12.0, settings.request_timeout_seconds)),
+        url_checker=UrlChecker(timeout=min(12.0, settings.request_timeout_seconds), email=settings.ncbi_email),
         capital_fetcher=restcountries_fetcher(),
         claimbuster=claimbuster,
         drafter=drafter,
         synopsizer=synopsizer,
+        reviewer=reviewer,
     )

@@ -105,6 +105,8 @@ def to_check_report(result: VerificationOut, input_text: str) -> dict:
             "claim_category": category,
             "verdict": verdict,
             "strength_of_support": claim.strength_of_support,
+            "checked_at": claim.checked_at,
+            "would_settle": claim.would_settle,
             "sources": sources,
             "mainstream_check": mainstream,
         }
@@ -142,10 +144,19 @@ def to_check_report(result: VerificationOut, input_text: str) -> dict:
     draft = None
     if result.draft_answer is not None:
         draft = {"model": result.draft_answer.model, "text": result.draft_answer.text}
+    review = result.review
+    review_out = {
+        "passes": list(review.passes),
+        "changes": [
+            {"claim": item.claim, "from": item.from_, "to": item.to, "reason": item.reason} for item in review.changes
+        ],
+        "signed_off_by": review.signed_off_by,
+    }
     return {
         "input_text": input_text,
         "claims": claims,
         "mode": result.mode,
         "draft_answer": draft,
         "synopsis": synopsis_out,
+        "review": review_out,
     }

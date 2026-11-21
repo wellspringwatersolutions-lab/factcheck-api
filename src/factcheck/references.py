@@ -19,11 +19,29 @@ _HISTORY = re.compile(
     re.I,
 )
 _YEAR = re.compile(r"\b(1[7-9]\d{2}|196[0-3])\b")
+_DOI_IN = re.compile(r"\b10\.\d{4,9}/")
+_HTTP_IN = re.compile(r"https?://")
 
 
 def user_agent(email: str) -> str:
     contact = email or "dev@localhost"
     return f"factcheck/0.1 (mailto:{contact})"
+
+
+_NEWS = re.compile(r"\b(today|this week|breaking|election|202[4-9]|203\d)\b", re.I)
+_SCIENCE = re.compile(r"\b(doi|study|trial|journal|paper)\b", re.I)
+
+
+def wants_newspapers(query: str) -> bool:
+    """Chronicling America is 1770–1963 newspapers. Skip later years and office facts."""
+    text = query or ""
+    if re.search(r"\b(19[7-9]\d|20\d{2})\b", text):
+        return False
+    if re.search(r"\b(newspaper|gazette|herald|chronicle|reported in)\b", text, re.I):
+        return True
+    if re.search(r"\b(president|commanding general|commander in chief|was born|date of birth)\b", text, re.I):
+        return False
+    return bool(_YEAR.search(text) or _HISTORY.search(text))
 
 
 def wants_reference_sources(categories: list[str] | None, query: str) -> bool:
@@ -32,6 +50,44 @@ def wants_reference_sources(categories: list[str] | None, query: str) -> bool:
         return True
     text = query or ""
     return bool(_HISTORY.search(text) or _YEAR.search(text))
+
+
+_ORDINALS = {"first": "1", "1st": "1", "second": "2", "2nd": "2", "third": "3", "3rd": "3"}
+
+
+def _role_text(text: str) -> str:
+    lowered = (text or "").lower()
+    lowered = lowered.replace("commander in chief", "commanding general")
+    for word, number in _ORDINALS.items():
+        lowered = re.sub(rf"\b{word}\b", f"ordinal {number}", lowered)
+    return lowered
+
+
+def wikidata_office_check(claim: str, passage: str) -> tuple[str, str] | None:
+    """Match a claimed office, rank, or event to a Wikidata sentence."""
+    from factcheck.textutil import overlap, tokens
+
+    claim_role = _role_text(claim)
+    patterns = (
+        r"Position held: ([^.]+)\.",
+        r"Military rank: ([^.]+)\.",
+        r"Participated in: ([^.]+)\.",
+    )
+    for pattern in patterns:
+        for match in re.finditer(pattern, passage or ""):
+            sentence = match.group(0)
+            role = _role_text(match.group(1))
+            role_tokens = tokens(role)
+            if not role_tokens or overlap(role, claim_role) < 0.6:
+                continue
+            record_ordinal = re.search(r"ordinal (\d+)", role)
+            claim_ordinal = re.search(r"ordinal (\d+)", claim_role)
+            if claim_ordinal and record_ordinal and claim_ordinal.group(1) != record_ordinal.group(1):
+                return "contradicts", sentence
+            if claim_ordinal and record_ordinal is None and "position held" in sentence.lower():
+                continue
+            return "entails", sentence
+    return None
 
 
 def wikidata_date_check(claim: str, passage: str) -> tuple[str, str] | None:
@@ -64,7 +120,7 @@ class WikidataRetriever:
         if not safe:
             return []
         sparql = f"""
-SELECT ?item ?itemLabel ?birth ?death WHERE {{
+SELECT ?item ?itemLabel ?birth ?death ?officeLabel ?ordinal ?rankLabel ?conflictLabel WHERE {{
   SERVICE wikibase:mwapi {{
     bd:serviceParam wikibase:api "EntitySearch" .
     bd:serviceParam wikibase:endpoint "www.wikidata.org" .
@@ -74,8 +130,15 @@ SELECT ?item ?itemLabel ?birth ?death WHERE {{
   }}
   OPTIONAL {{ ?item wdt:P569 ?birth . }}
   OPTIONAL {{ ?item wdt:P570 ?death . }}
+  OPTIONAL {{
+    ?item p:P39 ?stmt .
+    ?stmt ps:P39 ?office .
+    OPTIONAL {{ ?stmt pq:P1545 ?ordinal . }}
+  }}
+  OPTIONAL {{ ?item wdt:P410 ?rank . }}
+  OPTIONAL {{ ?item wdt:P607 ?conflict . }}
   SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en" . }}
-}} LIMIT {max(1, limit)}
+}} LIMIT {max(12, limit)}
 """.strip()
         self.limiter.acquire()
         try:
@@ -93,23 +156,53 @@ SELECT ?item ?itemLabel ?birth ?death WHERE {{
         if response.status_code >= 400:
             self.warnings.append(f"wikidata:http_{response.status_code}")
             return []
-        hits = []
+        grouped: dict[str, dict] = {}
         for row in ((response.json().get("results") or {}).get("bindings")) or []:
             label = ((row.get("itemLabel") or {}).get("value")) or safe
             item = ((row.get("item") or {}).get("value")) or ""
-            qid = item.rstrip("/").rsplit("/", 1)[-1]
+            qid = item.rstrip("/").rsplit("/", 1)[-1] or label
+            bucket = grouped.setdefault(
+                qid,
+                {"label": label, "item": item, "birth": "", "death": "", "offices": [], "ranks": [], "events": []},
+            )
             birth = (((row.get("birth") or {}).get("value")) or "")[:10]
             death = (((row.get("death") or {}).get("value")) or "")[:10]
-            parts = [f"Wikidata: {label}."]
             if birth:
-                parts.append(f"Date of birth: {birth}.")
+                bucket["birth"] = birth
             if death:
-                parts.append(f"Date of death: {death}.")
+                bucket["death"] = death
+            office = ((row.get("officeLabel") or {}).get("value")) or ""
+            ordinal = ((row.get("ordinal") or {}).get("value")) or ""
+            if office:
+                entry = (office, ordinal)
+                if entry not in bucket["offices"]:
+                    bucket["offices"].append(entry)
+            rank = ((row.get("rankLabel") or {}).get("value")) or ""
+            if rank and rank not in bucket["ranks"]:
+                bucket["ranks"].append(rank)
+            conflict = ((row.get("conflictLabel") or {}).get("value")) or ""
+            if conflict and conflict not in bucket["events"]:
+                bucket["events"].append(conflict)
+        hits = []
+        for qid, bucket in list(grouped.items())[:limit]:
+            parts = [f"Wikidata: {bucket['label']}."]
+            if bucket["birth"]:
+                parts.append(f"Date of birth: {bucket['birth']}.")
+            if bucket["death"]:
+                parts.append(f"Date of death: {bucket['death']}.")
+            for office, ordinal in bucket["offices"]:
+                suffix = f" (ordinal {ordinal})" if ordinal else ""
+                parts.append(f"Position held: {office}{suffix}.")
+            for rank in bucket["ranks"]:
+                parts.append(f"Military rank: {rank}.")
+            for event in bucket["events"]:
+                parts.append(f"Participated in: {event}.")
             text = " ".join(parts)
+            item = bucket["item"]
             hits.append(
                 Evidence(
                     url=f"https://www.wikidata.org/wiki/{qid}" if qid.startswith("Q") else item or "https://www.wikidata.org",
-                    title=label,
+                    title=bucket["label"],
                     snippet=text,
                     page_text=text,
                     provider=self.name,
@@ -129,11 +222,13 @@ class ChroniclingAmericaRetriever:
 
     def __init__(self, email: str = "dev@localhost", client: httpx.Client | None = None, min_interval: float = 1.0):
         self.email = email
-        self.client = client or httpx.Client(timeout=6.0)
+        self.client = client or httpx.Client(timeout=3.5)
         self.limiter = RateLimiter(min_interval)
         self.warnings: list[str] = []
 
     def search(self, query: str, *, limit: int = 3) -> list[Evidence]:
+        if not wants_newspapers(query):
+            return []
         params = {"fo": "json", "dl": "page", "c": min(limit, 5), "qs": query, "ops": "AND"}
         year = _YEAR.search(query or "")
         if year:
@@ -228,19 +323,56 @@ class ReferenceBundle:
         google=None,
         client: httpx.Client | None = None,
         timeout: float = 6.0,
+        nara_api_key: str = "",
+        smithsonian_api_key: str = "",
+        dpla_api_key: str = "",
+        europeana_api_key: str = "",
     ):
+        from factcheck.archives import (
+            CrossrefRetriever,
+            DplaRetriever,
+            EuropeanaRetriever,
+            GdeltRetriever,
+            InternetArchiveRetriever,
+            NaraRetriever,
+            SmithsonianRetriever,
+            WikipediaRetriever,
+        )
+
         self.wikidata = WikidataRetriever(email, client=client, min_interval=0.2)
         self.loc = ChroniclingAmericaRetriever(email, client=client, min_interval=1.0)
+        self.wikipedia = WikipediaRetriever(email, client=client, min_interval=0.2)
+        self.crossref = CrossrefRetriever(email, client=client, min_interval=0.4)
+        self.archive = InternetArchiveRetriever(email, client=client, min_interval=0.5)
+        self.gdelt = GdeltRetriever(client=client, min_interval=5.0)
+        self.nara = NaraRetriever(nara_api_key, client=client) if nara_api_key else None
+        self.smithsonian = SmithsonianRetriever(smithsonian_api_key, client=client) if smithsonian_api_key else None
+        self.dpla = DplaRetriever(dpla_api_key, client=client) if dpla_api_key else None
+        self.europeana = EuropeanaRetriever(europeana_api_key, client=client) if europeana_api_key else None
         self.google = google
         self.timeout = timeout
         self.warnings: list[str] = []
 
     def providers_for(self, categories: list[str] | None, query: str) -> list:
-        if not wants_reference_sources(categories, query):
-            return []
-        chosen = [self.wikidata, self.loc]
-        if self.google is not None:
-            chosen.append(self.google)
+        cats = set(categories or [])
+        text = query or ""
+        chosen = []
+        if wants_reference_sources(cats, text):
+            chosen.append(self.wikidata)
+            if wants_newspapers(text):
+                chosen.append(self.loc)
+            chosen.extend([self.wikipedia, self.archive])
+            for optional in (self.nara, self.smithsonian, self.dpla, self.europeana):
+                if optional is not None:
+                    chosen.append(optional)
+            if self.google is not None:
+                chosen.append(self.google)
+        if cats & {"T2", "T3", "T4"} or _DOI_IN.search(text) or _SCIENCE.search(text):
+            chosen.append(self.crossref)
+        if _NEWS.search(text):
+            chosen.append(self.gdelt)
+        if _HTTP_IN.search(text) and self.archive not in chosen:
+            chosen.append(self.archive)
         return chosen
 
     def search(self, query: str, *, limit: int = 3, categories: list[str] | None = None) -> list[Evidence]:

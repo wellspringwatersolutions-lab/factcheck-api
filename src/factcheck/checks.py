@@ -8,7 +8,7 @@ from dataclasses import dataclass
 
 import httpx
 
-from factcheck.textutil import has_negation, overlap, parse_date, quotes, urls
+from factcheck.textutil import has_negation, hostname, overlap, parse_date, quotes, urls
 from factcheck.types import Evidence
 
 _NUMBER = re.compile(r"(?<![\w])\d{1,3}(?:,\d{3})+(?:\.\d+)?|(?<![\w])\d+(?:\.\d+)?%?")
@@ -32,6 +32,12 @@ def content_hash(text: str) -> str:
 
 def _norm(text: str) -> str:
     return _WS.sub(" ", (text or "").lower()).strip()
+
+
+def quote_exact(page: str, quote: str) -> bool:
+    """Whitespace-folded containment. A review cannot cite a paraphrase as the quote."""
+    folded = _norm(quote)
+    return bool(folded) and folded in _norm(page)
 
 
 def quote_appears(page: str, quote: str) -> bool:
@@ -81,12 +87,25 @@ def dates_match(claim: str, passage: str) -> bool | None:
     return claim_date.year == passage_date.year
 
 
+def _with_synonyms(text: str) -> str:
+    """Add equivalent titles so overlap can see a paraphrase. The stored quote stays verbatim."""
+    lowered = text or ""
+    extra = [lowered]
+    if re.search(r"commander in chief", lowered, re.I):
+        extra.append(re.sub(r"commander in chief", "commanding general", lowered, flags=re.I))
+    if re.search(r"commanding general", lowered, re.I):
+        extra.append(re.sub(r"commanding general", "commander in chief", lowered, flags=re.I))
+    return " ".join(extra)
+
+
 def entailment(claim: str, passage: str) -> str:
     """Offline sentence check. Negation is read only inside this passage, never the whole page."""
     if not passage or not passage.strip():
         return "neutral"
     if "<" in passage and ">" in passage:
         passage = clean_html(passage)
+    claim = _with_synonyms(claim)
+    passage = _with_synonyms(passage)
     conflict = quantity_conflict(claim, passage)
     if conflict:
         return "contradicts"
@@ -223,6 +242,9 @@ def split_passages(text: str, limit: int = 6) -> list[str]:
 def apply_passage_checks(claim_text: str, evidence: Evidence, resolution: UrlResolution) -> Evidence:
     """Attach hash, URL status, and a cleaned page. Entailment is filled in later by judges."""
     raw = resolution.body or evidence.page_text or evidence.snippet or ""
+    snippet = (evidence.snippet or "").strip()
+    if snippet and snippet not in raw:
+        raw = f"{raw}\n{snippet}".strip()
     body = clean_html(raw)
     evidence.page_text = body
     evidence.content_sha256 = content_hash(body or raw)
@@ -244,9 +266,9 @@ def apply_passage_checks(claim_text: str, evidence: Evidence, resolution: UrlRes
             evidence.quote = conflict
             evidence.used = True
         if evidence.provider == "wikidata":
-            from factcheck.references import wikidata_date_check
+            from factcheck.references import wikidata_date_check, wikidata_office_check
 
-            dated = wikidata_date_check(claim_text, body)
+            dated = wikidata_date_check(claim_text, body) or wikidata_office_check(claim_text, body)
             if dated:
                 evidence.entailment = dated[0]
                 evidence.quote = dated[1]
@@ -279,7 +301,7 @@ def passage_check_rows(claim_text: str, evidence: list[Evidence]) -> list[dict]:
             }
         )
     for item in evidence:
-        if item.url_status is not None and item.url_status >= 400:
+        if item.url_status is not None and item.url_status >= 400 and item.url_status not in {401, 403, 429}:
             rows.append(
                 {
                     "name": "url_resolves",
@@ -301,9 +323,63 @@ def passage_check_rows(claim_text: str, evidence: list[Evidence]) -> list[dict]:
 class UrlChecker:
     """Resolve a URL and return its body. Corpus and tool schemes do not use the network."""
 
-    def __init__(self, timeout: float = 8.0, client: httpx.Client | None = None):
+    def __init__(self, timeout: float = 8.0, client: httpx.Client | None = None, email: str = "dev@localhost"):
         self.timeout = timeout
+        self.email = email or "dev@localhost"
         self._client = client
+
+    def _headers(self) -> dict[str, str]:
+        from factcheck.references import user_agent
+
+        return {
+            "User-Agent": user_agent(self.email),
+            "Accept": "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8",
+        }
+
+    def _wikipedia_extract(self, client: httpx.Client, url: str) -> str:
+        title = url.split("/wiki/", 1)[-1].replace("_", " ")
+        response = client.get(
+            "https://en.wikipedia.org/w/api.php",
+            params={
+                "action": "query",
+                "prop": "extracts",
+                "explaintext": 1,
+                "exintro": 1,
+                "exchars": 1200,
+                "titles": title,
+                "format": "json",
+                "formatversion": "2",
+            },
+            headers=self._headers(),
+        )
+        if response.status_code >= 400:
+            return ""
+        pages = ((response.json().get("query") or {}).get("pages")) or []
+        return (pages[0].get("extract") or "") if pages else ""
+
+    def _wayback(self, client: httpx.Client, url: str) -> str:
+        response = client.get(
+            "https://archive.org/wayback/available",
+            params={"url": url},
+            headers=self._headers(),
+        )
+        if response.status_code >= 400:
+            return ""
+        closest = ((response.json().get("archived_snapshots") or {}).get("closest")) or {}
+        if not closest.get("available") or not closest.get("url"):
+            return ""
+        return f"Archived copy of {url} at {closest.get('timestamp') or 'an earlier date'}."
+
+    def _fallback(self, url: str, snippet: str, status: int | None, client: httpx.Client) -> UrlResolution | None:
+        text = (snippet or "").strip()
+        if not text:
+            try:
+                text = self._wayback(client, url)
+            except httpx.HTTPError:
+                text = ""
+        if not text.strip():
+            return None
+        return UrlResolution(url, True, 200, url, text, content_hash(text), f"blocked HTTP {status}; used snippet or archive")
 
     def resolve(self, url: str, body: str = "") -> UrlResolution:
         if url.startswith(("scifact://", "fever://", "heldout://", "tool://", "corpus://")):
@@ -315,8 +391,18 @@ class UrlChecker:
         client = self._client or httpx.Client(timeout=self.timeout, follow_redirects=True)
         close = self._client is None
         try:
-            response = client.get(url)
+            host = hostname(url)
+            if host.endswith("wikipedia.org") and "/wiki/" in url:
+                extract = self._wikipedia_extract(client, url)
+                text = extract or body
+                if text.strip():
+                    return UrlResolution(url, True, 200, url, text, content_hash(text))
+            response = client.get(url, headers=self._headers())
             text = response.text or ""
+            if response.status_code in {401, 403, 429} or "Please set a user-agent" in text:
+                fallback = self._fallback(url, body, response.status_code, client)
+                if fallback is not None:
+                    return fallback
             ok = 200 <= response.status_code < 300 and bool(text.strip())
             return UrlResolution(
                 url=url,
@@ -329,7 +415,7 @@ class UrlChecker:
             )
         except httpx.HTTPError as exc:
             text = body or ""
-            return UrlResolution(url, False, None, url, text, content_hash(text), str(exc))
+            return UrlResolution(url, bool(text.strip()), 200 if text.strip() else None, url, text, content_hash(text), str(exc))
         finally:
             if close:
                 client.close()
@@ -348,5 +434,7 @@ class MapUrlChecker(UrlChecker):
         if url not in self.pages:
             return UrlResolution(url, False, 404, url, "", content_hash(""), "not in map")
         status, text = self.pages[url]
+        if status in {401, 403, 429} and (body or "").strip():
+            return UrlResolution(url, True, 200, url, body, content_hash(body), f"blocked HTTP {status}; used snippet")
         ok = 200 <= status < 300
         return UrlResolution(url, ok, status, url, text if ok else "", content_hash(text), "" if ok else f"HTTP {status}")

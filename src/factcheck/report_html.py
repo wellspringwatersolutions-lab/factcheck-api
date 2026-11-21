@@ -77,6 +77,10 @@ def _article(claim) -> str:
         bits.append(f"<p><strong>{html.escape(label)}</strong> · strength of support {claim.strength_of_support:.2f}</p>")
         if claim.hypothesis_status:
             bits.append(f"<p>Hypothesis status: {html.escape(claim.hypothesis_status.replace('_', ' '))}</p>")
+        if claim.would_settle:
+            bits.append(f"<p>{html.escape(claim.would_settle)}</p>")
+    if claim.checked_at:
+        bits.append(f"<p class=\"meta\">Checked {html.escape(claim.checked_at)}</p>")
     if claim.needs_human_review:
         bits.append("<p>Flagged for human review. The evidence trail is below.</p>")
     bits.append(f"<p>{html.escape(claim.reasoning)}</p>")
@@ -131,6 +135,8 @@ def _synopsis(verification: VerificationOut) -> str:
         word = "claim" if synopsis.unchecked_count == 1 else "claims"
         verb = "was" if synopsis.unchecked_count == 1 else "were"
         bits.append(f"<p>{synopsis.unchecked_count} important {word} {verb} not checked.</p>")
+    if verification.review.signed_off_by:
+        bits.append(f"<p class=\"meta\">Signed off by {html.escape(verification.review.signed_off_by)}</p>")
     bits.append("</section>")
     return "".join(bits)
 

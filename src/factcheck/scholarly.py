@@ -233,6 +233,20 @@ class SemanticScholarRetriever:
             },
             headers=headers,
         )
+        if problem == "rate_limited":
+            self.warnings.append("semantic_scholar:backoff")
+            time.sleep(0 if self.limiter.interval <= 0 else min(1.0, self.limiter.interval))
+            response, problem = _guarded_get(
+                self.client,
+                self.limiter,
+                "https://api.semanticscholar.org/graph/v1/paper/search",
+                params={
+                    "query": query,
+                    "limit": limit,
+                    "fields": "title,abstract,url,year,externalIds,tldr,influentialCitationCount,openAccessPdf,publicationVenue,publicationTypes",
+                },
+                headers=headers,
+            )
         if response is None:
             self.warnings.append(f"semantic_scholar:{problem}")
             return []

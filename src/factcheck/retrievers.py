@@ -134,10 +134,7 @@ class CompositeRetriever:
         if self.scholarly and (scientific or set(categories or []) & {"T2", "T3", "T4"}):
             jobs.append(lambda: self.scholarly.search(query, limit=limit, categories=categories or (["T2"] if scientific else [])))
         if self.references is not None:
-            from factcheck.references import wants_reference_sources
-
-            if wants_reference_sources(categories, query):
-                jobs.append(lambda: self.references.search(query, limit=limit, categories=categories))
+            jobs.append(lambda: self.references.search(query, limit=limit, categories=categories))
         hits: list[Evidence] = []
         if not jobs:
             return []

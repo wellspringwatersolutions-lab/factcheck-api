@@ -74,7 +74,7 @@ def build_mcp(service) -> MCPServer:
         description=(
             "Check a list of claims. Each claim is classified (T1 math through T8 opinion). "
             "T1 is recomputed. T8 returns mainstream_check. Other facts require quoted evidence. "
-            "Verdicts are Supported, Contradicted, Unverified, Conflicting, Unsupported, or Hypothesis. "
+            "Verdicts are Supported, Contradicted, Unverified, Conflicting, or Hypothesis. "
             "Same free-tier rules as verify_text."
         )
     )

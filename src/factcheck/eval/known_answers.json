@@ -1,0 +1,22 @@
+[
+  {"id": "k01", "text": "2 + 2 = 4", "label": "Supported", "kind": "tool"},
+  {"id": "k02", "text": "17 * 24 = 400", "label": "Contradicted", "kind": "tool"},
+  {"id": "k03", "text": "17 * 24 = 408", "label": "Supported", "kind": "tool"},
+  {"id": "k04", "text": "The Eiffel Tower is in Paris.", "label": "Supported", "kind": "fact"},
+  {"id": "k05", "text": "The Eiffel Tower is in Berlin.", "label": "Contradicted", "kind": "fact"},
+  {"id": "k06", "text": "Canberra is the capital of Australia.", "label": "Supported", "kind": "fact"},
+  {"id": "k07", "text": "Sydney is the capital of Australia.", "label": "Contradicted", "kind": "fact"},
+  {"id": "k08", "text": "Mount Everest is 8849 m tall.", "label": "Supported", "kind": "quantity"},
+  {"id": "k09", "text": "Mount Everest is 6500 m tall.", "label": "Contradicted", "kind": "quantity"},
+  {"id": "k10", "text": "Ada Lovelace was born in 1815.", "label": "Supported", "kind": "record"},
+  {"id": "k11", "text": "Ada Lovelace died in 1830.", "label": "Contradicted", "kind": "record"},
+  {"id": "k12", "text": "Water boils at 100 degrees Celsius at sea level.", "label": "Supported", "kind": "fact"},
+  {"id": "k13", "text": "A secret 2024 treaty doubled the length of the Nile.", "label": "Unverified", "kind": "no-record"},
+  {"id": "k14", "text": "The mayor said the budget is infinite and free for everyone.", "label": "Unverified", "kind": "quote"},
+  {"id": "k15", "text": "I think the bill is a disaster for small farms.", "label": "Opinion", "kind": "opinion"},
+  {"id": "k16", "text": "The new battery will replace lithium cells by 2030.", "label": "Hypothesis", "kind": "prediction"},
+  {"id": "k17", "text": "Abraham Lincoln was shot in 1865.", "label": "Supported", "kind": "history"},
+  {"id": "k18", "text": "Abraham Lincoln was shot in 1815.", "label": "Contradicted", "kind": "history"},
+  {"id": "k19", "text": "Garlic extract lowered systolic blood pressure by 8 mmHg in adults with hypertension.", "label": "Unverified", "kind": "medical"},
+  {"id": "k20", "text": "Gold is a dense solid metal at room temperature.", "label": "Supported", "kind": "fact"}
+]

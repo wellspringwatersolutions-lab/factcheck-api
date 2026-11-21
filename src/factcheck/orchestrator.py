@@ -16,7 +16,7 @@ from factcheck.categories import CATEGORIES, EFFORT_LIMITS, effort_for, normaliz
 from factcheck.checks import UrlChecker, apply_passage_checks, passage_check_rows
 from factcheck.cleanup import focus_query, is_bare_question, priority, split_dialogue
 from factcheck.compute import recompute
-from factcheck.credibility import annotate, dedupe_syndicated, dedupe_urls
+from factcheck.credibility import annotate, dedupe_syndicated, dedupe_urls, drop_circular
 from factcheck.judge import apply_verified_labels
 from factcheck.retrievers import lookup_capital
 from factcheck.questions import DraftError
@@ -153,6 +153,7 @@ class VerificationService:
         claimbuster=None,
         drafter=None,
         synopsizer=None,
+        reviewer=None,
     ):
         self.settings = settings
         self.extractor = extractor
@@ -169,6 +170,8 @@ class VerificationService:
         self.claimbuster = claimbuster
         self.drafter = drafter
         self.synopsizer = synopsizer
+        self.reviewer = reviewer
+        self._draft_text = ""
         self._disconnect = None
         self._meter_lock = __import__("threading").Lock()
 
@@ -201,6 +204,7 @@ class VerificationService:
             mode = "text"
             asked = None
             draft_answer = None
+            self._draft_text = ""
             check_text = text
             check_claims = claims
             if preclassified is None and not claims and (question or is_bare_question(text)):
@@ -208,6 +212,7 @@ class VerificationService:
                 asked = (question or text or "").strip()
                 model_name, drafted = self._draft(asked)
                 draft_answer = DraftAnswer(model=model_name, text=drafted)
+                self._draft_text = drafted
                 check_text = drafted
                 check_claims = None
             if preclassified is not None:
@@ -232,6 +237,11 @@ class VerificationService:
                 question=asked,
                 deadline=deadline,
             )
+            if self.reviewer is not None:
+                self.reviewer.meter = meter
+                from factcheck.review import run_review
+
+                run_review(payload, reviewer=self.reviewer, deadline=deadline, meter=meter)
             if payload.usage.tier == "owner":
                 logger.info("verification %s tier=owner ip=%s", payload.verification_id, getattr(client, "ip", ""))
             self.store.save(payload, fingerprint=getattr(client, "fingerprint", None), tier=payload.usage.tier, api_key_id=getattr(reservation, "api_key_id", None))
@@ -265,6 +275,7 @@ class VerificationService:
             reasoning=reason,
             attribution=claim.attribution,
             needs_human_review=False,
+            checked_at=datetime.now(timezone.utc).isoformat(),
         )
 
     def _draft(self, question: str) -> tuple[str, str]:
@@ -400,6 +411,7 @@ class VerificationService:
                 attribution=claim.attribution,
                 needs_human_review=False,
                 mainstream_check=mainstream,
+                checked_at=datetime.now(timezone.utc).isoformat(),
             )
 
     def _evidence_cluster(self, extracted, indexes, results, effort, meter, warnings) -> None:
@@ -414,6 +426,7 @@ class VerificationService:
             meter.add_usd(getattr(self.retriever, "cost_usd", 0.0) - before, retriever=True)
         warnings.extend(getattr(self.retriever, "warnings", [])[-3:])
         hits = dedupe_urls(hits)
+        hits = drop_circular(hits, [claim.text for claim in claims], getattr(self, "_draft_text", ""))
         hits = self._resolve_all(claims, hits, effort)
         sensitive = any(claim.time_sensitive for claim in claims)
         for hit in hits:
@@ -517,13 +530,15 @@ class VerificationService:
             claim_category=claim.claim_category,
             category_label=CATEGORIES.get(claim.claim_category, ""),
             effort=effort,
-            verdict=decision.verdict,
+            verdict="Unverified" if decision.verdict == "Unsupported" else decision.verdict,
             strength_of_support=strength,
             confidence=strength,
             reasoning=decision.reasoning,
             attribution=claim.attribution,
             needs_human_review=review,
             hypothesis_status=decision.hypothesis_status,
+            would_settle=decision.would_settle,
+            checked_at=datetime.now(timezone.utc).isoformat(),
             deterministic_checks=[CheckRow(**row) for row in checks],
             tool=tool,
             judges=judges,

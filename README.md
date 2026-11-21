@@ -15,12 +15,13 @@ The product name lives in `src/factcheck/branding.py` as `SERVICE_NAME`.
 - `mode`: `"text"` or `"question"`
 - `draft_answer`: `{"model", "text"}` when `mode` is `"question"`, otherwise `null`. The draft is not evidence and has no weight in a verdict.
 - `synopsis`: `{"rating", "tldr", "summary", "caveats", "unchecked_count", "counts"}`. `rating` is one of Accurate, Mostly accurate, Mixed, Mostly inaccurate, Inaccurate, Not enough evidence. It is computed from the claim verdicts and cited quotes. `tldr` is one sentence of at most 30 words, written in the same phrasing call as `summary` and dropped if it adds a fact. `counts` is `{"supported", "contradicted", "conflicting", "unverified", "hypothesis", "opinion", "not_checked"}`. When a cited passage contradicts the draft, `summary` states that quote as the corrected position. A short question without a `?` still counts as a question when it starts with a question word.
+- `review`: `{"passes", "changes": [{"claim", "from", "to", "reason"}], "signed_off_by"}`. Qwen proposes corrections and DeepSeek signs off. A correction can cite only a quote or tool trace already in the result. If time is short the review is skipped and `warnings` includes `review skipped`.
 - A failed draft is HTTP 503 `{"error": {"code": "draft_failed", ...}}`. That request is not charged.
 
 `POST /v1/verify` also returns:
 
 - `verification_id`, `created_at`, an input summary
-- `claims[]` with `claim_type`, `claim_category` (T1–T8), `verdict`, `strength_of_support` (also copied to `confidence`), `reasoning`, sources, and deterministic checks
+- `claims[]` with `claim_type`, `claim_category` (T1–T8), `verdict`, `strength_of_support` (also copied to `confidence`), `checked_at`, `would_settle` (hypotheses only), `reasoning`, sources, and deterministic checks
 - for opinions, `mainstream_check`: what professional fact-checkers said, never a true/false label
 - `summary`, `attribution`, `usage` (tokens, estimated USD, credits), `upgrade_url`
 - `needs_human_review` when the claim is high-stakes or the evidence is thin or contradictory
@@ -31,11 +32,10 @@ Verdicts:
 
 | Verdict | When |
 | --- | --- |
-| Supported | A quoted passage from one authoritative source entails the claim, or two independent sources do. More independent sources raise `strength_of_support`. A tool result (calculator, or a structured API such as REST Countries) also counts. |
-| Contradicted | A passage or a tool result conflicts with the claim, and the conflicting quote or trace is shown. |
-| Unsupported | Some evidence lines up, but not enough independent sources to call it supported. The service abstains. |
-| Unverified | No usable passage and no tool result. |
-| Conflicting | Independent sources disagree. |
+| Supported | A tool result, a structured fact of record such as a Wikidata office or date, or two independent sources from the upper part of the evidence scale. One encyclopedia page is not enough. |
+| Contradicted | The best quoted evidence goes against the claim as written. The site may display this as Conflicting. The API value stays `Contradicted`. |
+| Unverified | No usable passage, or only weak support: an anecdote, one source, or a source below the historical and official record. This means the claim could not be confirmed. It does not mean the claim is false. |
+| Conflicting | Credible sources disagree. Both quotes are shown. |
 | Hypothesis | A prediction, novel conjecture, or business idea. Status is `supporting_evidence`, `contradicting_evidence`, or `untested`. Never true or false. |
 
 Categories change how strict the check is:
@@ -47,6 +47,10 @@ Categories change how strict the check is:
 - **T6** Expert consensus. Weaker when sources conflict.
 - **T7** Eyewitness accounts. Low weight.
 - **T8** Opinions and anecdotes. These go to the mainstream fact-checker lane (Google Fact Check Tools, then Snopes, PolitiFact, FactCheck.org, AP Fact Check, and Reuters Fact Check).
+
+A Supported label needs a tool result, a structured fact of record such as a Wikidata date, or two independent sources from the upper part of the evidence scale (studies, the historical record, or an official source). One secondary page, an anecdote, or an eyewitness account stays Unverified. The API value stays `Contradicted` when the best evidence goes against the claim. Conflicting means credible sources disagree. There is no numeric score for the whole answer.
+
+Keyless history and reference sources, besides Wikidata and Chronicling America: Wikipedia (secondary, one shared origin), Crossref (mailto, no key), the Internet Archive and Wayback Machine, and GDELT DOC 2.0 for recent news. OpenAlex sends a mailto. Semantic Scholar works without a key and backs off once on HTTP 429.
 
 Numbers, dates, exact quotes, citations, and anything time-sensitive get a stricter retrieval pass. Cited URLs are fetched, quoted text has to appear on the page (exact or fuzzy), and the page body is hashed for the audit trail. A dead URL or a quote that is not on the page cannot support a claim.
 
@@ -108,7 +112,11 @@ That starts the API on port 8741, Postgres, and Redis. Put keys in `.env`. `.env
 | `CLAIMBUSTER_API_KEY` | Optional. Check-worthiness scores used only to order claims under the cap. Skipped when blank or slow. |
 | `NCBI_EMAIL` | Contact email sent with Wikidata, Chronicling America, and NCBI requests. |
 | `SEMANTIC_SCHOLAR_API_KEY` | Optional. Without it, Semantic Scholar is limited to about 1 request per second. |
-| `OPENALEX_EMAIL` | Mailto for the OpenAlex polite pool. Required for OpenAlex. |
+| `OPENALEX_EMAIL` | Mailto for the OpenAlex polite pool. If blank, `NCBI_EMAIL` is sent instead. |
+| `NARA_API_KEY` | Optional. National Archives Catalog. Email Catalog_API@nara.gov. Skipped when blank. |
+| `SMITHSONIAN_API_KEY` | Optional. Smithsonian Open Access via api.data.gov. Sign up at https://api.data.gov/signup/. Skipped when blank. |
+| `DPLA_API_KEY` | Optional. Digital Public Library of America. Request with `POST https://api.dp.la/v2/api_key/you@example.com`. Skipped when blank. |
+| `EUROPEANA_API_KEY` | Optional. Europeana Search API. Free account at https://api.europeana.eu/. Sent as `X-Api-Key`. Skipped when blank. |
 | `OPENALEX_API_KEY` | Optional OpenAlex key. |
 | `NCBI_API_KEY` | Optional. Raises the PubMed rate limit. |
 | `DATABASE_URL` | Default SQLite. On Render use `sqlite:////var/data/factcheck.db`. |

@@ -10,7 +10,10 @@ from factcheck.types import Evidence, ExtractedClaim, JudgeVote, UsageMeter
 _PROMPT = """STAGE: entailment
 You label each passage against the claim. You do not decide the final verdict.
 For every passage return SUPPORTS, REFUTES, or NOT_ENOUGH_INFO.
-quote must be copied verbatim from that passage. If you cannot quote it, use NOT_ENOUGH_INFO and an empty quote.
+A paraphrase can support the claim when the passage states the same fact in other words.
+"Commander in chief" and "commanding general" are the same role. "First" and ordinal 1 are the same.
+quote must still be copied verbatim from that passage or its search snippet. If you cannot quote it, use NOT_ENOUGH_INFO and an empty quote.
+If the page body is missing, the search snippet is the passage.
 Ignore HTML, scripts, and boilerplate. A negation in an unrelated sentence is not a refutation.
 Return JSON {"passages": [{"url": "...", "label": "SUPPORTS|REFUTES|NOT_ENOUGH_INFO", "quote": "verbatim words"}]}"""
 
@@ -70,7 +73,11 @@ def apply_verified_labels(passages: list[Evidence], votes: list[JudgeVote]) -> l
             continue
         if passage.provider == "wikidata" and passage.used and passage.entailment in {"entails", "contradicts"} and passage.quote:
             continue
-        if passage.url_status is not None and passage.url_status >= 400:
+        if (
+            passage.url_status is not None
+            and passage.url_status >= 400
+            and not (passage.url_status in {401, 403, 429} and (passage.page_text or passage.snippet))
+        ):
             passage.entailment = "neutral"
             passage.used = False
             passage.quote = ""

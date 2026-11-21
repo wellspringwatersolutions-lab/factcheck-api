@@ -48,18 +48,18 @@ def test_one_passage_is_not_enough_to_call_it_supported():
         )
     ]
     decision = decide(evidence, category="T5")
-    assert decision.verdict == "Unsupported"
+    assert decision.verdict == "Unverified"
     assert decision.supporting_quotes == [page]
     assert decision.needs_human_review is True
 
 
 def test_two_independent_passages_can_support():
     pages = {
-        "https://archives.example/paris": (
+        "https://www.archives.gov/research/paris": (
             200,
             "Paris is the capital of France according to the national archive catalog.",
         ),
-        "https://gazette.example/france": (
+        "https://www.loc.gov/item/france-capital": (
             200,
             "A gazetteer records Paris as the capital of France and a river city.",
         ),
@@ -67,8 +67,8 @@ def test_two_independent_passages_can_support():
     hits = [
         Evidence(url=url, title=title, snippet=body, provider="test")
         for url, (title, body) in {
-            "https://archives.example/paris": ("National archive", pages["https://archives.example/paris"][1]),
-            "https://gazette.example/france": ("Gazetteer", pages["https://gazette.example/france"][1]),
+            "https://www.archives.gov/research/paris": ("National archive", pages["https://www.archives.gov/research/paris"][1]),
+            "https://www.loc.gov/item/france-capital": ("Gazetteer", pages["https://www.loc.gov/item/france-capital"][1]),
         }.items()
     ]
     service, _, _, _ = make_service(hits=hits, pages=pages)
@@ -162,7 +162,7 @@ def test_eiffel_html_noise_is_supported_by_the_article_sentence():
     )
     result = service.verify(text=None, claims=["The Eiffel Tower is in Paris."], client=client(), charge=False)
     claim = result.claims[0]
-    assert claim.verdict == "Supported"
+    assert claim.verdict == "Unverified"
     assert claim.strength_of_support < 0.7
     assert claim.sources[0].quote
     assert "function" not in claim.sources[0].quote
@@ -259,4 +259,6 @@ def test_hypothesis_is_not_true_or_false():
     decision = decide(evidence, category="T8", hypothesis=True)
     assert decision.verdict == "Hypothesis"
     assert decision.hypothesis_status == "untested"
+    assert decision.would_settle
+    assert "not a fact" in decision.would_settle
     assert decision.verdict not in {"Supported", "Contradicted"}

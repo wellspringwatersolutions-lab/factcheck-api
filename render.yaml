@@ -40,6 +40,14 @@ services:
         sync: false
       - key: CLAIMBUSTER_API_KEY
         sync: false
+      - key: NARA_API_KEY
+        sync: false
+      - key: SMITHSONIAN_API_KEY
+        sync: false
+      - key: DPLA_API_KEY
+        sync: false
+      - key: EUROPEANA_API_KEY
+        sync: false
       - key: OPENAI_COMPAT_BASE_URL
         sync: false
       - key: OPENAI_COMPAT_API_KEY

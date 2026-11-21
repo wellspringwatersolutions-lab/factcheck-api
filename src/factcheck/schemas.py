@@ -92,6 +92,8 @@ class ClaimOut(BaseModel):
     attribution: str | None = None
     needs_human_review: bool = False
     hypothesis_status: HypothesisStatus | None = None
+    would_settle: str = ""
+    checked_at: str = ""
     deterministic_checks: list[CheckRow] = Field(default_factory=list)
     tool: dict | None = None
     judges: JudgesOut | None = None
@@ -134,6 +136,22 @@ class SynopsisOut(BaseModel):
     counts: SynopsisCounts = Field(default_factory=SynopsisCounts)
 
 
+class ReviewChange(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+    claim: str
+    from_: str = Field(alias="from")
+    to: str
+    reason: str
+
+
+class ReviewOut(BaseModel):
+    """Two-pass review. Empty when the review did not run."""
+
+    passes: list[str] = Field(default_factory=list)
+    changes: list[ReviewChange] = Field(default_factory=list)
+    signed_off_by: str = ""
+
+
 class UsageOut(BaseModel):
     input_tokens: int = 0
     output_tokens: int = 0
@@ -158,6 +176,7 @@ class VerificationOut(BaseModel):
     usage: UsageOut
     upgrade_url: str
     warnings: list[str] = Field(default_factory=list)
+    review: ReviewOut = Field(default_factory=ReviewOut)
 
 
 class VerifyIn(BaseModel):
