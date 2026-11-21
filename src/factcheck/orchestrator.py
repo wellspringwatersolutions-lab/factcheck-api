@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import re
 import threading
 import time
 from collections import Counter
@@ -13,10 +14,10 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 from factcheck.aggregate import RULES_VERSION, decide
-from factcheck.categories import CATEGORIES, EFFORT_LIMITS, effort_for, normalize_claim
+from factcheck.categories import CATEGORIES, EFFORT_LIMITS, effort_for, is_math, normalize_claim
 from factcheck.checks import UrlChecker, apply_debunk_labels, apply_passage_checks, passage_check_rows
 from factcheck.cleanup import focus_query, is_bare_question, peel_leading_question, priority, split_dialogue
-from factcheck.extract import heuristic_extract, select_key_points, split_compounds
+from factcheck.extract import fallback_points, heuristic_extract, select_key_points, standalone_claim
 from factcheck.queries import heuristic_queries, news_window
 from factcheck.request_ctx import (
     add_phase,
@@ -29,7 +30,7 @@ from factcheck.request_ctx import (
     retrieval_calls,
     set_phase,
 )
-from factcheck.retain import screen_hits
+from factcheck.retain import drop_invented_negative, entity_mismatch, blocked_site, screen_hits
 from factcheck.compute import recompute
 from factcheck.credibility import annotate, dedupe_syndicated, dedupe_urls, drop_circular
 from factcheck.judge import apply_verified_labels
@@ -55,27 +56,48 @@ from factcheck.types import Evidence, ExtractedClaim, UsageMeter
 logger = logging.getLogger("factcheck")
 
 
+def _clean_conjunctions(sentence: str) -> list[str]:
+    """Split a model point only when both sides are already complete sentences."""
+    parts = [part.strip() for part in re.split(r"\s+and\s+", sentence or "", flags=re.I) if part.strip()]
+    if len(parts) != 2:
+        return [sentence]
+    finished = []
+    for part in parts:
+        if part[-1:] not in ".!?":
+            part += "."
+        if part[0].islower():
+            part = part[0].upper() + part[1:]
+        if not standalone_claim(part):
+            return [sentence]
+        finished.append(part)
+    return finished
+
+
 def _split_key_points(claims: list) -> list:
-    """One checkable fact per point, then the six most specific."""
+    """Split model points on a clean 'and' only. Fallback sentences are not split."""
     pieces = []
     for claim in claims:
-        parts = split_compounds(claim.text)
-        if len(parts) <= 1:
-            pieces.append(claim)
+        if not standalone_claim(claim.text) and not is_math(claim.text):
             continue
-        for part in parts:
-            child = ExtractedClaim(
-                text=part,
-                claim_type=claim.claim_type,
-                claim_category=claim.claim_category,
-                time_sensitive=claim.time_sensitive,
-                scientific=claim.scientific,
-                attribution=claim.attribution,
-                fragile=claim.fragile,
-                hypothesis=claim.hypothesis,
-                span=claim.span or claim.text,
+        for part in _clean_conjunctions(claim.text):
+            if part == claim.text:
+                pieces.append(claim)
+                continue
+            pieces.append(
+                normalize_claim(
+                    ExtractedClaim(
+                        text=part,
+                        claim_type=claim.claim_type,
+                        claim_category=claim.claim_category,
+                        time_sensitive=claim.time_sensitive,
+                        scientific=claim.scientific,
+                        attribution=claim.attribution,
+                        fragile=claim.fragile,
+                        hypothesis=claim.hypothesis,
+                        span=claim.span or claim.text,
+                    )
+                )
             )
-            pieces.append(normalize_claim(child))
     return select_key_points(pieces, 6)
 
 
@@ -290,6 +312,7 @@ class VerificationService:
                 state.draft_text = drafted
                 check_text = drafted
                 check_claims = None
+            state.question = asked or ""
             t_extract = time.monotonic()
             if preclassified is not None:
                 extracted = [normalize_claim(item) for item in preclassified]
@@ -301,11 +324,30 @@ class VerificationService:
                 except Exception as exc:  # noqa: BLE001 - extraction must not consume the retrieval budget
                     snippet = (check_text or "")[:240]
                     logger.warning("extraction_fallback %s: %s snippet=%r", exc.__class__.__name__, exc, snippet)
-                    extracted = heuristic_extract(check_text, check_claims)
+                    extracted = []
                     warnings = [f"extraction_fallback:{exc.__class__.__name__}"]
                 extracted = [normalize_claim(item) for item in extracted]
-            if check_claims is None and preclassified is None:
+                if check_claims is None and (not extracted or any(item.startswith("extraction_fallback") for item in warnings)):
+                    retried: list = []
+                    if getattr(self.extractor, "retry_keypoints", None):
+                        try:
+                            retried = _call_with_timeout(self.extractor.retry_keypoints, 8.0, check_text) or []
+                        except Exception as exc:  # noqa: BLE001
+                            logger.warning("extraction retry %s snippet=%r", exc.__class__.__name__, (check_text or "")[:240])
+                            retried = []
+                    if retried:
+                        extracted = [normalize_claim(item) for item in retried]
+                        warnings = ["extraction_retry:deepseek"]
+                    else:
+                        extracted = fallback_points(check_text)
+                        if not any(item.startswith("extraction_fallback") for item in warnings):
+                            warnings.append("extraction_fallback:TimeoutError")
+            if mode == "question":
+                extracted = drop_invented_negative(extracted, asked)
+            if check_claims is None and preclassified is None and not any(item.startswith("extraction_fallback") for item in warnings):
                 extracted = _split_key_points(extracted)
+            elif check_claims is None and preclassified is None:
+                extracted = select_key_points(extracted, 6)
             set_phase("extract", time.monotonic() - t_extract)
             # Retrieval keeps 25s and the two-pass review keeps 16s on a real request.
             # A shorter budget, including a zero budget, is left alone so the request can stop.
@@ -566,9 +608,10 @@ class VerificationService:
                     extra_queries=queries[1:2],
                     window=window,
                     broad=True,
+                    budget=current_request(),
                 )
             )
-            kept, reasons = screen_hits(claim.text, found, window)
+            kept, reasons = screen_hits(claim.text, found, window, context=(current_request().question if current_request() else ""))
             logger.warning(
                 "retrieval claim=%r queries=%s returned=%d kept=%d drops=%s",
                 claim.text[:160],
@@ -610,6 +653,13 @@ class VerificationService:
                         votes.append(tie[0])
                 chosen = apply_verified_labels(chosen, votes)
             chosen = apply_debunk_labels(claim.text, chosen)
+            context = current_request().question if current_request() else ""
+            chosen = [
+                hit
+                for hit in chosen
+                if not blocked_site(hit.url)
+                and not entity_mismatch(claim.text, " ".join(part for part in (hit.title, hit.snippet, hit.page_text, hit.quote) if part), context)
+            ]
             decision = decide(
                 chosen,
                 category=claim.claim_category,

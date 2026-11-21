@@ -40,17 +40,38 @@ class DesearchRetriever:
     def _headers(self) -> dict[str, str]:
         return {"Authorization": self.api_key}
 
-    def _rows(self, path: str, query: str, limit: int, window: dict | None) -> list[Evidence]:
+    def _exchange(self, method: str, url: str, *, budget, **kwargs):
+        """One attempt, then one retry on a timeout or a 5xx. Each attempt counts toward the cap."""
+
+        def once():
+            if not reserve_retrieval(budget):
+                logger.warning("desearch call cap reached before %s", url)
+                return None
+            self.retrieval_calls += 1
+            try:
+                return self.client.request(method, url, **kwargs)
+            except httpx.TimeoutException:
+                logger.warning("desearch timeout method=%s url=%s", method, url)
+                return "timeout"
+
+        response = once()
+        retry = response == "timeout" or (response is not None and getattr(response, "status_code", 0) >= 500)
+        if retry:
+            status = "timeout" if response == "timeout" else response.status_code
+            logger.warning("desearch retry after status=%s url=%s", status, url)
+            response = once()
+        if response is None or response == "timeout":
+            return None
+        if response.status_code >= 400:
+            logger.warning("desearch status=%s url=%s", response.status_code, url)
+            return None
+        return response
+
+    def _rows(self, path: str, query: str, limit: int, window: dict | None, budget=None) -> list[Evidence]:
         params = {"query": query, "start": 0}
-        if path == "/news" and window:
-            params["start_date"] = window["start_date"]
-            params["end_date"] = window["end_date"]
-        if not reserve_retrieval():
-            logger.warning("desearch call cap reached before %s", path)
+        response = self._exchange("GET", f"{self.base_url}{path}", budget=budget, params=params, headers=self._headers())
+        if response is None:
             return []
-        self.retrieval_calls += 1
-        response = self.client.get(f"{self.base_url}{path}", params=params, headers=self._headers())
-        response.raise_for_status()
         payload = response.json()
         header_cost = _cost_header(response)
         body_cost = float(payload.get("cost_usd") or 0) if isinstance(payload, dict) else 0.0
@@ -75,16 +96,13 @@ class DesearchRetriever:
         """Keyword web results. Dated search uses POST /search."""
         return self._rows("/web", query, limit, None)
 
-    def _post_search(self, query: str, limit: int, window: dict | None) -> list[Evidence]:
+    def _post_search(self, query: str, limit: int, window: dict | None, budget=None) -> list[Evidence]:
         """POST /search. The date window is not sent: Desearch would drop undated pages."""
         del window
-        if not reserve_retrieval():
-            logger.warning("desearch call cap reached before /search")
-            return []
         body: dict = {"query": query, "count": min(10, max(limit, 1)), "highlights": True}
-        self.retrieval_calls += 1
-        response = self.client.post(f"{self.base_url}/search", json=body, headers=self._headers())
-        response.raise_for_status()
+        response = self._exchange("POST", f"{self.base_url}/search", budget=budget, json=body, headers=self._headers())
+        if response is None:
+            return []
         payload = response.json()
         header_cost = _cost_header(response)
         body_cost = float(payload.get("cost_usd") or 0) if isinstance(payload, dict) else 0.0
@@ -110,7 +128,7 @@ class DesearchRetriever:
             )
         return [hit for hit in hits if hit.url]
 
-    def search_web_and_news(self, queries: list[str], *, limit: int = 10, window: dict | None = None) -> list[Evidence]:
+    def search_web_and_news(self, queries: list[str], *, limit: int = 10, window: dict | None = None, budget=None) -> list[Evidence]:
         """A dated claim uses POST /search. Anything else uses GET /web. Never both, never GET /news."""
         hits: list[Evidence] = []
         seen: set[str] = set()
@@ -124,9 +142,9 @@ class DesearchRetriever:
                 continue
             try:
                 if window:
-                    batch = self._post_search(cleaned, min(limit, 10), window)
+                    batch = self._post_search(cleaned, min(limit, 10), window, budget)
                 else:
-                    batch = self._rows("/web", cleaned, min(limit, 10), None)
+                    batch = self._rows("/web", cleaned, min(limit, 10), None, budget)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("desearch query failed: %s", exc.__class__.__name__)
                 continue
@@ -218,12 +236,13 @@ class CompositeRetriever:
         extra_queries: list[str] | None = None,
         window: dict | None = None,
         broad: bool = False,
+        budget=None,
     ) -> list[Evidence]:
         jobs = []
         for provider in self.providers:
             if broad and hasattr(provider, "search_web_and_news"):
                 queries = [query, *(extra_queries or [])]
-                jobs.append(lambda provider=provider, queries=queries: provider.search_web_and_news(queries, limit=limit, window=window))
+                jobs.append(lambda provider=provider, queries=queries: provider.search_web_and_news(queries, limit=limit, window=window, budget=budget))
             else:
                 jobs.append(lambda provider=provider: provider.search(query, limit=limit))
         if self.scholarly and (scientific or set(categories or []) & {"T2", "T3", "T4"}):

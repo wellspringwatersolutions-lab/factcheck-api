@@ -208,16 +208,18 @@ def fallback_summary(rating: str, question: str | None, claims: list[ClaimOut], 
             sentence = sentence.rstrip(".") + ", but " + " and ".join(caveat_bits)
         elif caveat_bits:
             sentence = caveat_bits[0][:1].upper() + caveat_bits[0][1:]
-    sentence = sentence.rstrip(".") + "."
-    tail = ""
+    if not sentence.strip():
+        sentence = _template_sentence(rating, claims)
+    sentence = sentence.strip().rstrip(".") + "."
     notes = []
     if unverified and rating != "Not enough evidence":
-        notes.append(f"{len(unverified)} stayed unverified")
+        word = "claim" if len(unverified) == 1 else "claims"
+        notes.append(f"{len(unverified)} {word} stayed unverified.")
     if unchecked_count:
-        notes.append(f"{unchecked_count} {'was' if unchecked_count == 1 else 'were'} not checked")
-    if notes:
-        tail = "Also, " + " and ".join(notes) + "."
-    return " ".join(part for part in (f"{rating}.", sentence, tail) if part)
+        word = "claim" if unchecked_count == 1 else "claims"
+        verb = "was" if unchecked_count == 1 else "were"
+        notes.append(f"{unchecked_count} {word} {verb} not checked.")
+    return polish_prose(" ".join(part for part in (f"{rating}.", sentence, *notes) if part))
 
 
 def _cited_corrections(claims: list[ClaimOut]) -> list[str]:
@@ -282,7 +284,7 @@ def complete_sentence(text: str) -> bool:
     words = cleaned[:-1].split()
     if len(words) < 4 or words[-1].lower().strip(",;:") in _DANGLING:
         return False
-    if words[0].lower() in {"but", "and", "or"}:
+    if words[0].lower().strip(",;:") in {"but", "and", "or", "also"}:
         return False
     return True
 
@@ -312,6 +314,17 @@ def _template_sentence(rating: str, claims: list[ClaimOut]) -> str:
 
 def _word_count(text: str) -> int:
     return len(re.findall(r"\b[\w']+\b", text or ""))
+
+
+def polish_prose(text: str) -> str:
+    """Drop a leading period or 'Also,' and collapse '. .'."""
+    cleaned = " ".join((text or "").split())
+    cleaned = re.sub(r"\.\s*\.", ".", cleaned)
+    cleaned = re.sub(r"^(?:\.\s*)+", "", cleaned).strip()
+    cleaned = re.sub(r"(?i)^also,\s*", "", cleaned).strip()
+    if cleaned and cleaned[0].islower():
+        cleaned = cleaned[0].upper() + cleaned[1:]
+    return cleaned
 
 
 def fallback_tldr(rating: str, summary: str, claims: list[ClaimOut] | None = None) -> str:
@@ -405,6 +418,12 @@ def build_synopsis(
             answer = answer_for_rating(rating)
     else:
         answer = answer_for_rating(rating)
+    summary = polish_prose(summary)
+    tldr = polish_prose(tldr)
+    if not complete_sentence(tldr):
+        tldr = _template_sentence(rating, claims)
+    if re.match(r"(?i)^also\b", summary) or summary.startswith("."):
+        summary = f"{rating}. {_template_sentence(rating, claims)}"
     return SynopsisOut(
         rating=rating,
         summary=summary,

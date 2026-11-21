@@ -92,13 +92,34 @@ def split_compounds(sentence: str) -> list[str]:
     return pieces or ([sentence.strip()] if sentence and sentence.strip() else [])
 
 
+_FINITE = re.compile(
+    r"\b(is|are|was|were|be|been|has|have|had|do|does|did|will|can|may|must|shall|told|says|said|advises|advise|recommends|warns|warned|distributed|raised|gave|gives|ran)\b",
+    re.I,
+)
+_BAD_START = re.compile(r"^(by|and|or|but|including|recommending|cranking|\d)", re.I)
+_DOUBLED_VERB = re.compile(r"\b(recommending|advising|warning)\b.+\b(recommends|advises|warns)\b", re.I)
+
+
+def standalone_claim(text: str) -> bool:
+    """A key point must be one complete sentence with a subject and a finite verb."""
+    cleaned = " ".join((text or "").split())
+    if len(cleaned) < 12 or cleaned[0] in ",.;:" or not cleaned[0].isupper():
+        return False
+    if cleaned[-1] not in ".!?":
+        return False
+    if _BAD_START.match(cleaned) or _DOUBLED_VERB.search(cleaned):
+        return False
+    words = cleaned[:-1].split()
+    if len(words) < 4 or words[-1].lower().strip(",;:") in {"and", "or", "but", "the", "a", "an", "of", "to", "for", "with"}:
+        return False
+    return bool(_FINITE.search(cleaned))
+
+
 def build_sentences(text: str | None, claims: list[str] | None) -> list[Sentence]:
     if claims:
         context = " ".join((text or "").split())[:500]
         return [Sentence(i, claim.strip(), context) for i, claim in enumerate(claims) if claim and claim.strip()]
-    parts: list[str] = []
-    for sentence in split_sentences(text or ""):
-        parts.extend(split_compounds(sentence))
+    parts = [part for part in split_sentences(text or "") if part.strip()]
     sentences = []
     for index, part in enumerate(parts):
         window = " ".join(parts[max(0, index - 1) : index + 2])
@@ -262,6 +283,14 @@ If you cannot resolve something without changing the wording, keep the original 
 Do not change fact into opinion or the reverse.
 Preserve attribution.
 Return JSON {"sentences": [{"id": 0, "text": "...", "drop": false, "claim_type": "fact|opinion", "attribution": null}]}"""
+
+_RETRY = """Extract at most 6 checkable key points from the text.
+Each point is one complete sentence with a subject and a finite verb.
+Keep headline facts and debunks, such as who has not told people to do something.
+Do not return fragments, participial phrases, or a sentence that repeats its verb.
+Do not invent a claim that is not written in the text.
+Return JSON {"points": [{"text": "...", "span": "..."}]}"""
+
 
 _DECOMPOSE = """Pick up to 6 checkable key points. Use the same points for the same text.
 Prefer specific claims: named programs, numbers, dates, and official guidance. Drop vague wrap-up lines.
@@ -472,7 +501,34 @@ class LiveExtractor:
                 continue
             seen.add(key)
             unique.append(claim)
-        return select_key_points(unique, 6), warnings
+        return select_key_points([item for item in unique if standalone_claim(item.text) or is_math(item.text)], 6), warnings
+
+    def retry_keypoints(self, text: str | None) -> list[ExtractedClaim]:
+        """One short DeepSeek call after the main extraction times out."""
+        prepared = (prepare_answer(text) if text else "")[:6000]
+        if not prepared:
+            return []
+        model = getattr(self.settings, "judge_a_model", None) or "deepseek-ai/DeepSeek-V3.2-TEE"
+        result = self.client.complete(
+            model=model,
+            messages=[
+                {"role": "system", "content": _RETRY},
+                {"role": "user", "content": prepared},
+            ],
+            temperature=0.0,
+            max_tokens=500,
+            timeout=8.0,
+            response_format=_CLAIM_SCHEMA,
+        )
+        charge_tokens(
+            self.meter,
+            model=result.model,
+            provider=result.provider,
+            input_tokens=result.input_tokens,
+            output_tokens=result.output_tokens,
+            cost=estimate_cost(self.settings, result.model, result.input_tokens, result.output_tokens),
+        )
+        return [item for item in _claims_from_result(result) if standalone_claim(item.text)]
 
 
 _SPECIFIC = re.compile(
@@ -482,14 +538,25 @@ _SPECIFIC = re.compile(
 )
 
 
+def fallback_points(text: str | None, limit: int = 6) -> list[ExtractedClaim]:
+    """Sentence splitter only. Fragments are dropped. Debunks and headlines stay."""
+    found = []
+    for claim in heuristic_extract(text, None):
+        if standalone_claim(claim.text) or is_math(claim.text):
+            found.append(claim)
+    return select_key_points(found, limit)
+
+
 def select_key_points(claims: list[ExtractedClaim], limit: int = 6) -> list[ExtractedClaim]:
-    """Stable order. Specific factual claims come before vague ones."""
+    """Stable order. Specific factual claims, especially debunks, come first."""
     from factcheck.cleanup import priority
 
     def rank(claim: ExtractedClaim):
         opinion = 1 if claim.claim_type == "opinion" else 0
-        specific = 0 if _SPECIFIC.search(claim.text or "") else 1
-        return (opinion, specific, priority(claim), claim.text.lower())
+        text = claim.text or ""
+        debunk = 0 if re.search(r"\b(not|never|no|debunk|false|hoard)\b", text, re.I) else 1
+        specific = 0 if _SPECIFIC.search(text) else 1
+        return (opinion, debunk, specific, priority(claim), text.lower())
 
     ranked = sorted(claims, key=rank)
     chosen: list[ExtractedClaim] = []

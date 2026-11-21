@@ -18,6 +18,7 @@ class RequestState:
     deadline: float | None = None
     disconnect: object | None = None
     draft_text: str = ""
+    question: str = ""
     on_progress: object | None = None
     retrieval_calls: int = 0
     drops: dict[str, int] = field(default_factory=dict)
@@ -80,9 +81,9 @@ def drop_counts() -> dict[str, int]:
         return dict(state.drops)
 
 
-def reserve_retrieval() -> bool:
-    """Count one Desearch call. False once this check has used its cap."""
-    state = _CURRENT.get()
+def reserve_retrieval(state: RequestState | None = None) -> bool:
+    """Count one Desearch call, including a retry. False once this check is at the cap."""
+    state = state if state is not None else _CURRENT.get()
     if state is None:
         return True
     with state.lock:

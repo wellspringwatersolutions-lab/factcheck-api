@@ -17,7 +17,7 @@ class RecordingRetriever:
         self.cost_usd = 0.0
         self.warnings: list[str] = []
 
-    def search(self, query: str, *, limit: int = 6, scientific: bool = False, categories: list[str] | None = None, extra_queries=None, window=None, broad: bool = False):
+    def search(self, query: str, *, limit: int = 6, scientific: bool = False, categories: list[str] | None = None, extra_queries=None, window=None, broad: bool = False, budget=None):
         from factcheck.request_ctx import note_retrieval
 
         self.queries.append(query)

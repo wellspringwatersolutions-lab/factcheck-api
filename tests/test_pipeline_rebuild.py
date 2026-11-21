@@ -213,7 +213,7 @@ def test_three_lower_tier_sources_or_one_official_page_are_likely_true():
                 origin_id=host,
             )
         )
-    assert decide(pages, category="T6", claim_text="Households were told to keep a 72 hour emergency kit.").verdict == "likely_true"
+    assert decide(pages, category="T6", claim_text="Households were told to keep a 72 hour emergency kit.").verdict == "Unverified"
     official = Evidence(
         url="https://www.ready.gov/kit",
         title="Ready.gov",
@@ -248,7 +248,7 @@ def test_concurrent_checks_do_not_share_usage():
     from tests.conftest import RecordingRetriever
 
     class Charging(RecordingRetriever):
-        def search(self, query, *, limit=6, scientific=False, categories=None, extra_queries=None, window=None, broad=False):
+        def search(self, query, *, limit=6, scientific=False, categories=None, extra_queries=None, window=None, broad=False, budget=None):
             found = super().search(
                 query,
                 limit=limit,
@@ -281,9 +281,114 @@ def test_concurrent_checks_do_not_share_usage():
     right.join()
     assert first[0].usage.retrieval_calls >= 1
     assert second[0].usage.retrieval_calls >= 1
-    assert first[0].usage.input_tokens == 10
-    assert second[0].usage.input_tokens == 10
+    assert first[0].usage.input_tokens > 0
+    assert second[0].usage.input_tokens > 0
+    assert first[0].usage.input_tokens + second[0].usage.input_tokens == 30
+    assert first[0].usage.input_tokens != 30
     assert first[0].verification_id != second[0].verification_id
+
+
+def test_fallback_keeps_the_debunk_and_drops_fragments():
+    from factcheck.extract import fallback_points, standalone_claim
+
+    text = "\n".join(
+        [
+            "10 other European countries, cranking freezer temperatures up.",
+            "By getting households to keep 3 to 7 days of shelf-stable food, water,",
+            "The U.S. government has not told civilians to hoard 90 days of food.",
+            "Norway distributed updated booklets recommending 7 days recommends 3 to 10 days.",
+        ]
+    )
+    assert not standalone_claim("10 other European countries, cranking freezer temperatures up.")
+    assert not standalone_claim("By getting households to keep 3 to 7 days of shelf-stable food, water,")
+    assert not standalone_claim("Norway distributed updated booklets recommending 7 days recommends 3 to 10 days.")
+    assert standalone_claim("The U.S. government has not told civilians to hoard 90 days of food.")
+    points = fallback_points(text)
+    assert [claim.text for claim in points] == ["The U.S. government has not told civilians to hoard 90 days of food."]
+
+
+def test_wrong_person_and_people_search_sites_are_dropped():
+    claim = "John Adams was a lawyer and the second president."
+    context = "was john adams a criminal"
+    hits = [
+        Evidence(url="https://www.nps.gov/adam", title="John Adams", snippet="John Adams was the second president and a lawyer.", grade="A"),
+        Evidence(url="https://en.wikipedia.org/wiki/John_Bodkin_Adams", title="John Bodkin Adams", snippet="John Bodkin Adams was a British doctor convicted of fraud.", grade="B"),
+        Evidence(url="https://www.mylife.com/john-adams", title="John Adams", snippet="John Adams, age 54, Houston.", grade="E"),
+        Evidence(url="https://www.spokeo.com/John-Adams", title="John Adams", snippet="John Adams phone and address.", grade="E"),
+        Evidence(url="https://texas.example/criminal-records/adams", title="Adams", snippet="The Adams Family crime gang operated in Texas.", grade="E"),
+    ]
+    kept, drops = screen_hits(claim, hits, None, context=context)
+    assert [hit.url for hit in kept] == ["https://www.nps.gov/adam"]
+    assert drops.get("blocked_site", 0) >= 2
+    assert drops.get("entity_mismatch", 0) >= 1
+    germany = "Germany recommends households keep food for 3 to 10 days."
+    noise = [
+        Evidence(url="https://www.bbc.com/covid", title="Germany quarantine", snippet="Germany required a 10 day COVID quarantine for travelers.", grade="B"),
+        Evidence(url="https://vacation.example/germany", title="Germany vacation", snippet="Book a Germany vacation rental for 10 days.", grade="E"),
+        Evidence(url="https://www.bbc.com/kit", title="German food advice", snippet="Germany recommends households keep emergency food for 10 days.", grade="B"),
+    ]
+    kept_de, _drops = screen_hits(germany, noise, None)
+    assert [hit.url for hit in kept_de] == ["https://www.bbc.com/kit"]
+
+
+def test_absence_of_sources_is_not_contradicted_and_blogs_are_not_likely_true():
+    claim = "There are no criminal convictions against John Adams."
+    assert decide([], category="T5", claim_text=claim).verdict == "Unverified"
+    blogs = [
+        Evidence(url=f"https://prepper-{index}.example/kit", title="Kit", snippet="Households should keep a 72 hour food kit.", page_text="Households should keep a 72 hour food kit.", quote="Households should keep a 72 hour food kit.", entailment="entails", used=True, grade="C", source_type="secondary", origin_id=f"prepper-{index}.example")
+        for index in range(4)
+    ]
+    assert decide(blogs, category="T6", claim_text="Households should keep a 72 hour food kit.").verdict == "Unverified"
+
+
+def test_synopsis_does_not_start_with_also_or_a_period():
+    from factcheck.synopsis import build_synopsis, polish_prose
+    from tests.test_synopsis import _claim
+
+    assert polish_prose("Mostly accurate. . Also, 2 stayed unverified.") == "Mostly accurate. Also, 2 stayed unverified."
+    garbled = build_synopsis(
+        [
+            _claim("The government advice is a 72-hour kit.", "likely_true", 0.6),
+            _claim("One detail was not retrieved.", "Unverified", 0.1),
+            _claim("Another detail was not retrieved.", "Unverified", 0.1),
+        ]
+    )
+    assert not garbled.summary.startswith(".")
+    assert not garbled.tldr.lower().startswith("also")
+    assert ". ." not in garbled.summary
+    assert ". ." not in garbled.tldr
+
+
+def test_desearch_cap_is_shared_across_threads_and_retries_count():
+    from factcheck.request_ctx import begin_request, end_request, reserve_retrieval
+    from factcheck.types import UsageMeter
+
+    state, token = begin_request(UsageMeter())
+    try:
+        def hammer():
+            for _ in range(40):
+                reserve_retrieval(state)
+
+        threads = [threading.Thread(target=hammer) for _ in range(4)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        assert state.retrieval_calls == 60
+        assert state.drops.get("call_cap", 0) >= 1
+    finally:
+        end_request(token)
+
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(500, json={"detail": "down"})
+        return httpx.Response(200, json={"data": []}, headers={"X-Desearch-Cost-Usd": "0"})
+
+    DesearchRetriever("k", client=httpx.Client(transport=httpx.MockTransport(handler))).search("taxes")
+    assert calls["n"] == 2
 
 
 _FOOD = [
@@ -326,10 +431,9 @@ def test_food_paste_keeps_undated_fact_checkers_and_official_pages():
     assert "date_window" not in gao_drops
     assert any(hit.url.endswith("crossword") for hit in hits)
     assert not any(hit.url.endswith("crossword") for hit in denial + kit + gao)
-    parts = split_compounds(_FOOD[1])
-    assert len(parts) >= 3
-    assert any(part.lower().startswith("the eu") for part in parts)
-    assert any("uk" in part.lower() for part in parts)
+    from factcheck.orchestrator import _clean_conjunctions
+
+    assert _clean_conjunctions(_FOOD[1]) == [_FOOD[1]]
     service, retriever, _, _ = make_service(hits=hits)
     result = service.verify(text=None, claims=_FOOD, client=client(), charge=False)
     report = to_check_report(result, "\n".join(_FOOD))

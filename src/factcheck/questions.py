@@ -11,6 +11,8 @@ from factcheck.textutil import parse_json_object
 
 _DRAFT = """Answer the question in two to four factual sentences.
 Put the direct answer first. Add one caveat only when it belongs in the usual account.
+State facts a biography or an official page would say: offices, dates, and actions.
+Do not invent "there are no criminal convictions" from the question alone.
 Do not include URLs or a source list.
 stance is the direct answer: yes, no, partly, or not_enough_evidence.
 Use not_enough_evidence only when you cannot answer.

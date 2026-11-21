@@ -18,6 +18,8 @@ If the page body is missing, the search snippet is the passage.
 Ignore HTML, scripts, and boilerplate. A negation in an unrelated sentence is not a refutation.
 A source that debunks a rumor SUPPORTS a claim denying that rumor. Snopes or Lead Stories rating the story False supports "has not" or "did not".
 A page that only repeats the rumor is NOT_ENOUGH_INFO when a fact-checker has debunked it. It is not a refutation of the denial.
+Reject a passage about a different person or topic. John Bodkin Adams is not John Adams. A COVID quarantine or a vacation page does not bear on emergency food supplies.
+People-search and criminal-records sites are not evidence.
 Return JSON {"passages": [{"url": "...", "label": "SUPPORTS|REFUTES|NOT_ENOUGH_INFO", "quote": "verbatim words"}]}"""
 
 _LABELS = {

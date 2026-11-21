@@ -181,12 +181,12 @@ def _agrees(claim_text: str, passage: Evidence) -> bool:
 
 
 def _independent_agreements(claim_text: str, passages: list[Evidence]) -> list[Evidence]:
-    """Lower-tier pages that say the same thing. Three independent origins are enough."""
+    """Three agreeing sources count only when each one is grade A or B."""
     chosen: dict[str, Evidence] = {}
     for passage in passages:
-        if passage.source_type in {"anecdote", "eyewitness", "syndicated"}:
+        if passage.grade not in {"A", "B"} and not _reputable(passage):
             continue
-        if passage.grade == "E" and passage.entailment != "entails":
+        if passage.source_type in {"anecdote", "eyewitness", "syndicated"}:
             continue
         if not _agrees(claim_text, passage):
             continue
@@ -481,18 +481,19 @@ def decide(
                 needs_human_review=high_stakes,
                 supporting_quotes=[item.quote for item in primaries if item.quote][:1],
             )
-        origins = {item.origin_id or hostname(item.url) for item in supporting}
+        good = [item for item in supporting if item.grade in {"A", "B"} or _reputable(item)]
+        origins = {item.origin_id or hostname(item.url) for item in good}
         origins.discard("")
         if len(origins) >= 3:
             return Decision(
                 verdict="likely_true",
                 strength_of_support=0.56,
                 reasoning=(
-                    f"Likely true. {len(origins)} independent sources quote passages that line up with the claim. "
+                    f"Likely true. {len(origins)} independent reputable sources quote passages that line up with the claim. "
                     + STRENGTH_NOTE
                 ),
                 needs_human_review=high_stakes,
-                supporting_quotes=support_quotes[:3],
+                supporting_quotes=[item.quote for item in good if item.quote][:3],
             )
         return Decision(
             verdict="Unverified",
