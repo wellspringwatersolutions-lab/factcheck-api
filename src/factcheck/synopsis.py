@@ -45,12 +45,13 @@ _ABSTAIN = "There wasn't enough evidence to settle this."
 _INSTRUCTION = """You phrase a veracity synopsis. You do not decide it.
 The rating is already fixed and must be the first words of summary: {rating}
 Write summary as one to three plain sentences that answer the question from the claim verdicts and cited quotes below.
-Also write tldr as one complete sentence of at most 30 words. It must start with a capital letter, end with a period, and must not start with a comma or the word but.
+Also write tldr as one complete sentence of at most 35 words. It must lead with the confirmed denial or the strongest confirmed claim, start with a capital letter, end with a period, and must not start with "Claims about" or an unconfirmed claim.
 Do not add any person, place, date, number, or event that is not written in the brief.
 If the rating is "Not enough evidence", both summary and tldr must say there was not enough evidence, and must not sound confident.
-If the rating is "Partly verified" or "Mostly accurate", say which claims were confirmed and which could not be confirmed.
+If the rating is "Partly verified" or "Mostly accurate", the summary's first sentence is what was confirmed. The next sentence says what could not be confirmed.
+For each unverified claim, topics is a noun phrase of at most 8 words copied from that claim. Do not treat apostrophes as quotation marks. Do not join two claims with and.
 Every sentence must be a complete sentence.
-Return JSON {{"summary": "...", "tldr": "..."}}"""
+Return JSON {{"summary": "...", "tldr": "...", "topics": ["..."]}}"""
 
 
 def _unchecked(claim: ClaimOut) -> bool:
@@ -162,14 +163,21 @@ def _direct(question: str | None, main: list[str]) -> str:
     return ""
 
 
-def fallback_summary(rating: str, question: str | None, claims: list[ClaimOut], caveats: list[str], unchecked_count: int) -> str:
+def fallback_summary(
+    rating: str,
+    question: str | None,
+    claims: list[ClaimOut],
+    caveats: list[str],
+    unchecked_count: int,
+    topics: list[str] | None = None,
+) -> str:
     facts = _checked_facts(claims)
     supported = [claim.text for claim in facts if claim.verdict in {"Supported", "likely_true"}]
     contradicted = [claim.text for claim in facts if claim.verdict == "Contradicted"]
     unverified = [claim for claim in facts if claim.verdict in {"Unverified", "Unsupported", None}]
     if rating == "Partly verified":
-        conclusion = _conclusion(supported)
-        missed = _unconfirmed_sentence([claim.text for claim in unverified[:2]])
+        conclusion = _headline_text(facts)
+        missed = _unconfirmed_sentence([claim.text for claim in unverified[:2]], topics)
         parts = [f"{rating}."]
         if conclusion:
             parts.append(conclusion)
@@ -239,7 +247,7 @@ def fallback_summary(rating: str, question: str | None, claims: list[ClaimOut], 
     sentence = sentence.strip().rstrip(".") + "."
     notes = []
     if unverified and rating != "Not enough evidence":
-        missed = _unconfirmed_sentence([claim.text for claim in unverified[:2]])
+        missed = _unconfirmed_sentence([claim.text for claim in unverified[:2]], topics)
         if missed:
             notes.append(missed)
     if unchecked_count:
@@ -354,52 +362,108 @@ def polish_prose(text: str) -> str:
     return cleaned
 
 
+_DOUBLE_QUOTE = re.compile(r'["“]([^"”]{1,80})["”]')
+_DENIAL = re.compile(r"\b(not|never|no|n't|misread|rumou?r|false|debunk|has not|have not|did not)\b", re.I)
+_VERDICT_RANK = {"Supported": 0, "likely_true": 1}
+
+
+def _claim_words(text: str) -> set[str]:
+    return {word.lower() for word in re.findall(r"[A-Za-z0-9]+(?:'[A-Za-z0-9]+)?", text or "")}
+
+
+def _trim_words(text: str, limit: int) -> str:
+    words = [word for word in (text or "").split() if word]
+    return " ".join(words[:limit])
+
+
+def _valid_topic(phrase: str, claim: str) -> bool:
+    """A noun phrase of at most 8 words, each one a whole word from the claim."""
+    words = (phrase or "").split()
+    if not words or len(words) > 8:
+        return False
+    if re.search(r"\band\b", phrase or "", re.I) and len(words) > 6:
+        return False
+    known = _claim_words(claim)
+    cleaned = [re.sub(r"^[^A-Za-z0-9]+|[^A-Za-z0-9]+$", "", word) for word in words]
+    return all(word and word.lower() in known for word in cleaned)
+
+
 def _topic(text: str) -> str:
-    quoted = re.findall(r"['\"]([^'\"]{2,80})['\"]", text or "")
+    """A short topic. Quotation marks are \" and curly quotes, never apostrophes."""
+    quoted = _DOUBLE_QUOTE.findall(text or "")
     if quoted:
-        return quoted[0].strip()
-    skip = {"the", "a", "an", "of", "to", "in", "on", "for", "and", "or", "that", "this", "was", "were", "is", "are"}
-    words = [word for word in re.findall(r"[A-Za-z0-9][A-Za-z0-9'’-]*", text or "") if word.lower() not in skip]
-    return " ".join(words[:5]) or "that detail"
+        return _trim_words(quoted[0].strip(), 8)
+    return _first_clause(text)
 
 
-def _unconfirmed_sentence(texts: list[str]) -> str:
-    topics = [_topic(text) for text in texts if text and text.strip()]
-    if not topics:
+def _first_clause(text: str) -> str:
+    cleaned = " ".join((text or "").split()).strip().rstrip(".!?")
+    clause = re.split(r"[,;:]", cleaned, maxsplit=1)[0].strip()
+    return _trim_words(clause, 8)
+
+
+def _unconfirmed_sentence(texts: list[str], topics: list[str] | None = None) -> str:
+    """One sentence per claim. Two fragments are never glued together with and."""
+    sentences = []
+    for index, text in enumerate(texts[:2]):
+        if not text or not text.strip():
+            continue
+        supplied = topics[index] if topics and index < len(topics) else ""
+        topic = supplied.strip() if supplied and _valid_topic(supplied, text) else _topic(text)
+        if not topic:
+            continue
+        sentences.append(f"Claims about {topic} could not be confirmed.")
+    return " ".join(sentences)
+
+
+def _headline_text(claims: list[ClaimOut] | None, limit: int = 35) -> str:
+    """The debunk or denial, otherwise the strongest confirmed claim, in 35 words or fewer."""
+    facts = [claim for claim in _checked_facts(claims or []) if claim.verdict in {"Supported", "likely_true"}]
+    if not facts:
         return ""
-    if len(topics) == 1:
-        return f"Claims about {topics[0]} could not be confirmed."
-    return f"Claims about {topics[0]} and {topics[1]} could not be confirmed."
+    denials = [claim for claim in facts if _DENIAL.search(claim.text or "")]
+    pool = denials or facts
+    pool.sort(key=lambda claim: (_VERDICT_RANK.get(claim.verdict or "", 9), -_weight(claim)))
+    return _trim_sentence(pool[0].text, limit)
 
 
-def _conclusion(confirmed: list[str]) -> str:
-    """Lead with a denial or the main confirmed claim, not with an unverified rumor."""
-    denial = re.compile(r"\b(not|never|no|n't|misread|rumou?r|false|debunk)\b", re.I)
-    ordered = sorted((text.strip() for text in confirmed if text and text.strip()), key=lambda text: 0 if denial.search(text) else 1)
-    bits = [text.rstrip(".") for text in ordered[:2]]
-    if not bits:
+def _trim_sentence(text: str, limit: int = 35) -> str:
+    cleaned = " ".join((text or "").split()).strip().rstrip(".!?")
+    words = cleaned.split()
+    if len(words) > limit:
+        words = words[:limit]
+    while words and words[-1].lower().strip(",;:") in _DANGLING:
+        words.pop()
+    if len(words) < 4:
         return ""
-    if len(bits) == 1:
-        sentence = bits[0]
-    else:
-        second = bits[1][0].lower() + bits[1][1:] if bits[1][:1].isupper() else bits[1]
-        sentence = f"{bits[0]}, while {second}"
-    if sentence[-1:] not in ".!?":
+    sentence = " ".join(words).rstrip(",;:")
+    if sentence[0].islower():
+        sentence = sentence[0].upper() + sentence[1:]
+    if sentence[-1] not in ".!?":
         sentence += "."
-    return sentence
+    return sentence if complete_sentence(sentence) else ""
+
+
+def _shares_conclusion(sentence: str, headline: str) -> bool:
+    left = _claim_words(sentence)
+    right = [word for word in _claim_words(headline) if len(word) >= 4]
+    return any(word in left for word in right[:8])
 
 
 def fallback_tldr(rating: str, summary: str, claims: list[ClaimOut] | None = None) -> str:
-    """One whole sentence. A fragment is replaced with a template."""
+    """One whole sentence. The confirmed claim leads, even when that sentence is long."""
     if rating == "Not enough evidence":
         return _ABSTAIN
+    headline = _headline_text(claims)
+    if headline:
+        return headline
     parts = split_sentences(summary or "")
     for part in parts:
         if part.rstrip(".").lower() == rating.lower():
             continue
-        if _word_count(part) > 45:
+        if len(part.split()) > 35:
             continue
-        if complete_sentence(part):
+        if complete_sentence(part) and not part.lower().startswith("claims about"):
             return part
     return _template_sentence(rating, claims or [])
 
@@ -426,16 +490,59 @@ def _says_not_enough(text: str) -> bool:
     return "not enough evidence" in lowered or "enough evidence to settle" in lowered or "wasn't enough evidence" in lowered
 
 
-def _accept_tldr(text: str, corpus: str, rating: str) -> bool:
+def _accept_tldr(text: str, corpus: str, rating: str, claims: list[ClaimOut] | None = None) -> bool:
     cleaned = (text or "").strip()
-    if not complete_sentence(cleaned) or _word_count(cleaned) > 30:
+    if not complete_sentence(cleaned) or len(cleaned.split()) > 35:
         return False
+    headline = _headline_text(claims)
+    if headline:
+        if cleaned.lower().startswith("claims about"):
+            return False
+        if not _shares_conclusion(cleaned, headline):
+            return False
     allowed = corpus
     if rating == "Not enough evidence":
         if not _says_not_enough(cleaned):
             return False
         allowed = f"{corpus}\n{_ABSTAIN}"
     return grounded(cleaned, allowed)
+
+
+def _usable_topics(phrased, claims: list[ClaimOut]) -> list[str] | None:
+    if not isinstance(phrased, dict) or not isinstance(phrased.get("topics"), list):
+        return None
+    texts = [claim.text for claim in _checked_facts(claims) if claim.verdict in {"Unverified", "Unsupported", None}]
+    if not texts:
+        return None
+    chosen = []
+    used_model = False
+    for index, text in enumerate(texts[:2]):
+        raw = phrased["topics"][index] if index < len(phrased["topics"]) else ""
+        phrase = raw.strip() if isinstance(raw, str) else ""
+        if phrase and _valid_topic(phrase, text):
+            chosen.append(" ".join(phrase.split()))
+            used_model = True
+        else:
+            chosen.append(_topic(text))
+    return chosen if used_model else None
+
+
+_GLUED_TOPICS = re.compile(r"Claims about .{1,120} and .{1,120} could not be confirmed", re.I)
+
+
+def _summary_leads(summary: str, rating: str, claims: list[ClaimOut]) -> bool:
+    cleaned = (summary or "").strip()
+    body = cleaned[len(rating):].lstrip(" .") if cleaned.lower().startswith(rating.lower()) else cleaned
+    if not complete_sentence(body) or _GLUED_TOPICS.search(body):
+        return False
+    headline = _headline_text(claims)
+    if not headline:
+        return True
+    lead = split_sentences(body)[:1]
+    sentence = lead[0] if lead else ""
+    if sentence.lower().startswith("claims about"):
+        return False
+    return _shares_conclusion(sentence, headline)
 
 
 def build_synopsis(
@@ -446,25 +553,28 @@ def build_synopsis(
     deadline: float | None = None,
 ) -> SynopsisOut:
     rating, caveats, unchecked_count = rate_claims(claims)
-    summary = fallback_summary(rating, question, claims, caveats, unchecked_count)
-    tldr = fallback_tldr(rating, summary, claims)
     counts = claim_counts(claims)
     # A contradiction is stated from the cited quote. Do not let a phrasing call rewrite it.
     contradicted = any(claim.verdict == "Contradicted" for claim in claims)
     remaining = None if deadline is None else deadline - time.monotonic()
+    phrased = None
     if phrasing is not None and not contradicted and (remaining is None or remaining >= 3.5):
         brief = _brief(rating, question, claims)
         try:
             phrased = phrasing(brief, rating)
         except Exception:  # noqa: BLE001 - a failed phrasing call must not fail the report
             phrased = None
+    else:
+        brief = ""
+    topics = _usable_topics(phrased, claims)
+    summary = fallback_summary(rating, question, claims, caveats, unchecked_count, topics)
+    tldr = fallback_tldr(rating, summary, claims)
+    if phrased is not None:
         summary_text, tldr_text = _phrased_parts(phrased)
-        if summary_text and grounded(summary_text, brief):
+        if summary_text and grounded(summary_text, brief) and _summary_leads(summary_text, rating, claims):
             cleaned = summary_text.strip()
-            body = cleaned[len(rating):].lstrip(" .") if cleaned.lower().startswith(rating.lower()) else cleaned
-            if complete_sentence(body):
-                summary = cleaned if cleaned.lower().startswith(rating.lower()) else f"{rating}. {body}"
-        if tldr_text and _accept_tldr(tldr_text, brief, rating):
+            summary = cleaned if cleaned.lower().startswith(rating.lower()) else f"{rating}. {cleaned}"
+        if tldr_text and _accept_tldr(tldr_text, brief, rating, claims):
             tldr = tldr_text.strip()
     from factcheck.reconcile import answer_for_rating
 
@@ -558,7 +668,11 @@ class LLMSynopsis:
             return None
         if isinstance(tldr, str) and tldr.strip() and not complete_sentence(tldr.strip()):
             tldr = ""
-        return {
+        payload_out = {
             "summary": summary.strip(),
             "tldr": tldr.strip() if isinstance(tldr, str) else "",
         }
+        topics = payload.get("topics")
+        if isinstance(topics, list):
+            payload_out["topics"] = [item.strip() for item in topics if isinstance(item, str) and item.strip()]
+        return payload_out

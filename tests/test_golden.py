@@ -331,8 +331,8 @@ def test_abbreviations_stay_inside_the_sentence_and_the_tldr():
     assert not synopsis.tldr.rstrip(".").endswith("U.S")
     assert "U.S." not in synopsis.tldr or "commands" in synopsis.tldr
     assert synopsis.summary.lower().index("u.s.") < synopsis.summary.lower().index("claims about")
-    assert "Claims about AI apocalypse could not be confirmed." in synopsis.summary
-    assert "'AI apocalypse' could not be confirmed." not in synopsis.summary
+    assert "could not be confirmed" in synopsis.summary
+    assert "t pointing" not in synopsis.summary
 
 
 def test_unrelated_pages_are_dropped_and_encyclopedia_quotes_are_shared():

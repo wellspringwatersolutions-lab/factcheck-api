@@ -35,6 +35,58 @@ WASHINGTON = [
 ]
 
 
+def test_food_tldr_leads_with_the_debunk_and_does_not_glue_topics():
+    from factcheck.synopsis import _topic
+
+    apocalypse = 'Recent outages aren\'t pointing to a single imminent "AI apocalypse".'
+    grids = "Aging power grids increasingly failing is a separate infrastructure problem."
+    assert _topic(apocalypse) == "AI apocalypse"
+    assert _topic('Recent outages aren’t pointing to a single imminent “AI apocalypse”.') == "AI apocalypse"
+    assert "t pointing" not in _topic(apocalypse)
+    assert _topic(grids).startswith("Aging power grids increasingly failing")
+    denial = "The U.S. government has not told civilians to hoard 90 days of food."
+    rows = [
+        _claim(denial, "likely_true", 0.6),
+        _claim("Europe's updated civil-defense guidance for households is real.", "likely_true", 0.6),
+        _claim(apocalypse, "Unverified", 0.15, reasoning="No retrieved passage backs this claim."),
+        _claim(grids, "Unverified", 0.15, reasoning="No retrieved passage backs this claim."),
+    ]
+    synopsis = build_synopsis(rows)
+    assert synopsis.tldr.startswith("The U.S. government has not told")
+    assert not synopsis.tldr.lower().startswith("claims about")
+    assert len(synopsis.tldr.split()) <= 35
+    assert synopsis.summary.lower().index("has not told") < synopsis.summary.lower().index("claims about")
+    assert "Claims about AI apocalypse could not be confirmed." in synopsis.summary
+    assert "Claims about Aging power grids increasingly failing" in synopsis.summary
+    assert "t pointing" not in synopsis.summary
+    assert "t pointing" not in synopsis.tldr
+    assert "and Aging" not in synopsis.summary
+
+    long_denial = denial[:-1] + " " + " ".join(f"detail{index}" for index in range(30)) + "."
+    long_rows = [
+        _claim(long_denial, "Supported", 0.8),
+        _claim(apocalypse, "Unverified", 0.15, reasoning="No retrieved passage backs this claim."),
+    ]
+    long_synopsis = build_synopsis(long_rows)
+    assert long_synopsis.tldr.startswith("The U.S. government has not told")
+    assert len(long_synopsis.tldr.split()) <= 35
+    assert not long_synopsis.tldr.lower().startswith("claims about")
+
+    def phrase(brief, rating):
+        return {
+            "summary": "Partly verified. Claims about t pointing to a single imminent and Aging power grids increasingly failing could not be confirmed.",
+            "tldr": "Claims about t pointing to a single imminent and Aging power grids increasingly failing could not be confirmed.",
+            "topics": ["imminent AI apocalypse", "this phrase invents a volcano"],
+        }
+
+    phrased = build_synopsis(rows, phrasing=phrase)
+    assert phrased.tldr.startswith("The U.S. government has not told")
+    assert "t pointing" not in phrased.summary
+    assert "Claims about imminent AI apocalypse could not be confirmed." in phrased.summary
+    assert "volcano" not in phrased.summary
+    assert "Claims about Aging power grids increasingly failing" in phrased.summary
+
+
 def test_synopsis_shape_includes_the_caveat():
     synopsis = build_synopsis(WASHINGTON, question="Was George Washington a criminal?")
     assert set(synopsis.model_dump()) == {"rating", "answer", "summary", "tldr", "caveats", "unchecked_count", "counts"}
