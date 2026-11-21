@@ -65,7 +65,9 @@ def _tldr(answer: str, draft: str, caveats: list[str], correction: str) -> str:
         built = sentence if _starts(sentence, answer) else f"{lead}. {sentence}"
         if complete_sentence(built):
             return built
-    pieces = [part.strip() for part in re.split(r"(?<=[.!?])\s+", " ".join((draft or "").split())) if part.strip()]
+    from factcheck.textutil import split_sentences
+
+    pieces = split_sentences(draft or "")
     first = next((part for part in pieces if complete_sentence(part)), "")
     caveat = ""
     if caveats:

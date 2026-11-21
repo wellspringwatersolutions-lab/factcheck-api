@@ -14,7 +14,7 @@ def test_mcp_tool_schemas():
     mcp = build_mcp(service)
     tools = asyncio.run(mcp.list_tools())
     by_name = {tool.name: tool for tool in tools}
-    assert set(by_name) == {"verify_text", "verify_claims", "get_verification"}
+    assert set(by_name) == {"verify_text", "verify_claims", "start_check", "get_job", "get_verification"}
     for tool in tools:
         schema = tool.model_dump(mode="json")["input_schema"]
         assert schema["type"] == "object"

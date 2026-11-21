@@ -13,6 +13,7 @@ import time
 from factcheck.llm import LLMError, estimate_cost, loads_object
 from factcheck.request_ctx import charge_tokens
 from factcheck.schemas import ClaimOut, SynopsisCounts, SynopsisOut
+from factcheck.textutil import split_sentences
 
 _RATINGS = (
     "Accurate",
@@ -167,11 +168,13 @@ def fallback_summary(rating: str, question: str | None, claims: list[ClaimOut], 
     contradicted = [claim.text for claim in facts if claim.verdict == "Contradicted"]
     unverified = [claim for claim in facts if claim.verdict in {"Unverified", "Unsupported", None}]
     if rating == "Partly verified":
-        held = [text.rstrip(".") for text in supported[:2]]
-        missed = [claim.text.rstrip(".") for claim in unverified[:2]]
+        conclusion = _conclusion(supported)
+        missed = _unconfirmed_sentence([claim.text for claim in unverified[:2]])
         parts = [f"{rating}."]
-        parts.extend(f"{item}." for item in held)
-        parts.extend(f"{item} could not be confirmed." for item in missed)
+        if conclusion:
+            parts.append(conclusion)
+        if missed:
+            parts.append(missed)
         return polish_prose(" ".join(parts))
     if rating == "Not enough evidence":
         parts = ["Not enough evidence."]
@@ -236,8 +239,9 @@ def fallback_summary(rating: str, question: str | None, claims: list[ClaimOut], 
     sentence = sentence.strip().rstrip(".") + "."
     notes = []
     if unverified and rating != "Not enough evidence":
-        word = "claim" if len(unverified) == 1 else "claims"
-        notes.append(f"{len(unverified)} {word} stayed unverified.")
+        missed = _unconfirmed_sentence([claim.text for claim in unverified[:2]])
+        if missed:
+            notes.append(missed)
     if unchecked_count:
         word = "claim" if unchecked_count == 1 else "claims"
         verb = "was" if unchecked_count == 1 else "were"
@@ -350,15 +354,50 @@ def polish_prose(text: str) -> str:
     return cleaned
 
 
+def _topic(text: str) -> str:
+    quoted = re.findall(r"['\"]([^'\"]{2,80})['\"]", text or "")
+    if quoted:
+        return quoted[0].strip()
+    skip = {"the", "a", "an", "of", "to", "in", "on", "for", "and", "or", "that", "this", "was", "were", "is", "are"}
+    words = [word for word in re.findall(r"[A-Za-z0-9][A-Za-z0-9'’-]*", text or "") if word.lower() not in skip]
+    return " ".join(words[:5]) or "that detail"
+
+
+def _unconfirmed_sentence(texts: list[str]) -> str:
+    topics = [_topic(text) for text in texts if text and text.strip()]
+    if not topics:
+        return ""
+    if len(topics) == 1:
+        return f"Claims about {topics[0]} could not be confirmed."
+    return f"Claims about {topics[0]} and {topics[1]} could not be confirmed."
+
+
+def _conclusion(confirmed: list[str]) -> str:
+    """Lead with a denial or the main confirmed claim, not with an unverified rumor."""
+    denial = re.compile(r"\b(not|never|no|n't|misread|rumou?r|false|debunk)\b", re.I)
+    ordered = sorted((text.strip() for text in confirmed if text and text.strip()), key=lambda text: 0 if denial.search(text) else 1)
+    bits = [text.rstrip(".") for text in ordered[:2]]
+    if not bits:
+        return ""
+    if len(bits) == 1:
+        sentence = bits[0]
+    else:
+        second = bits[1][0].lower() + bits[1][1:] if bits[1][:1].isupper() else bits[1]
+        sentence = f"{bits[0]}, while {second}"
+    if sentence[-1:] not in ".!?":
+        sentence += "."
+    return sentence
+
+
 def fallback_tldr(rating: str, summary: str, claims: list[ClaimOut] | None = None) -> str:
     """One whole sentence. A fragment is replaced with a template."""
     if rating == "Not enough evidence":
         return _ABSTAIN
-    parts = [part.strip() for part in re.split(r"(?<=[.!?])\s+", summary or "") if part.strip()]
+    parts = split_sentences(summary or "")
     for part in parts:
         if part.rstrip(".").lower() == rating.lower():
             continue
-        if _word_count(part) > 30:
+        if _word_count(part) > 45:
             continue
         if complete_sentence(part):
             return part

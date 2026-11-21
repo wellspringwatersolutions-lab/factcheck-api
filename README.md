@@ -96,6 +96,8 @@ POST /check
 {"job_id": "<uuid>", "status": "queued"}
 ```
 
+`GET /constitution` publishes the checker rules as markdown. Send `Accept: application/json` for the same document as JSON. `GET /llms.txt` links it and spells out the two response shapes: `/v1/verify` puts the wording in `claims[].text`, and `/check` puts it in `claims[].claim`. Every response sends `X-Request-Id` and JSON bodies include `request_id`. A 402 or 429 also sends `Retry-After` and `error.retry_after`. Agents that should not block can call the MCP tools `start_check` and `get_job`. Paid credit packs are not on sale.
+
 Poll `GET /v1/jobs/<job_id>`:
 
 ```json

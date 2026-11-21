@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 
 from factcheck.checks import is_denial
 from factcheck.credibility import is_encyclopedia, source_weight
-from factcheck.textutil import hostname
+from factcheck.textutil import hostname, split_sentences
 from factcheck.types import Evidence
 
 RULES_VERSION = "5"
@@ -123,7 +123,7 @@ def _strength(passages: list[Evidence], *, category: str, verdict: str, origins:
 
 
 def _biographical_sentence(text: str) -> str:
-    parts = [part.strip() for part in re.split(r"(?<=[.!?])\s+", text or "") if part.strip()]
+    parts = split_sentences(text or "")
     for part in parts:
         if _ROLE_WORDS.search(part) and not _GUILT.search(part):
             return part

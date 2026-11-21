@@ -7,27 +7,116 @@ from urllib.parse import urlparse
 
 import asyncio
 import logging
-import threading
 import time
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.openapi.utils import get_openapi
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from mcp.server.transport_security import TransportSecuritySettings
 
 from factcheck.billing import BillingError, ClientIdentity, owner_ips, owner_key_matches, resolve_client_ip
+from factcheck.constitution import constitution_document, constitution_markdown
 from factcheck.questions import DraftError
 from factcheck.config import Settings, get_settings
 from factcheck.discovery import llms_txt, manifest
+from factcheck.jobs import enqueue_check
 from factcheck.mcp_server import build_mcp, current_identity, reset_identity, set_identity
 from factcheck.payments import StripeCreditPacks, TaoDeposits
 from factcheck.report_html import render_home, render_report
-from factcheck.schemas import VerifyIn
+from factcheck.schemas import (
+    CheckReportOut,
+    ErrorResponse,
+    JobAccepted,
+    JobStatusOut,
+    VerificationOut,
+    VerifyIn,
+)
 from factcheck.web_report import to_check_report
 from factcheck.wiring import build_service
 
 logger = logging.getLogger("factcheck")
+
+_ERROR_RESPONSES = {
+    400: {"model": ErrorResponse, "description": "The request body is missing or invalid."},
+    401: {"model": ErrorResponse, "description": "The API key is unknown."},
+    402: {"model": ErrorResponse, "description": "The free check was used, or the key has no credits. Retry-After is set."},
+    413: {"model": ErrorResponse, "description": "The text or the claim list is too long."},
+    429: {"model": ErrorResponse, "description": "The daily spend cap was reached. Retry-After is set."},
+    500: {"model": ErrorResponse, "description": "The check failed before a verdict was saved."},
+    503: {"model": ErrorResponse, "description": "The draft answer could not be written."},
+}
+
+
+class RequestIdMiddleware:
+    """Put X-Request-Id on every response and log it. Never log a key."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+        headers = {key.decode().lower(): value.decode() for key, value in scope.get("headers") or []}
+        request_id = (headers.get("x-request-id") or "").strip() or str(uuid4())
+        state = scope.setdefault("state", {})
+        if isinstance(state, dict):
+            state["request_id"] = request_id
+        status_holder = {"status": 0}
+
+        async def send_wrapper(message):
+            if message["type"] == "http.response.start":
+                status_holder["status"] = message["status"]
+                raw = [item for item in list(message.get("headers") or []) if item[0].lower() != b"x-request-id"]
+                raw.append((b"x-request-id", request_id.encode()))
+                message["headers"] = raw
+            await send(message)
+
+        try:
+            await self.app(scope, receive, send_wrapper)
+        finally:
+            logger.info(
+                "request_id=%s method=%s path=%s status=%s",
+                request_id,
+                scope.get("method"),
+                scope.get("path"),
+                status_holder["status"],
+            )
+
+
+def _request_id(request: Request) -> str:
+    state = request.scope.get("state") or {}
+    if isinstance(state, dict) and state.get("request_id"):
+        return str(state["request_id"])
+    return str(getattr(getattr(request, "state", None), "request_id", "") or "")
+
+
+def _error(request: Request, status: int, code: str, message: str, retry_after: int | None = None, upgrade_url: str | None = None):
+    rid = _request_id(request)
+    error = {"code": code, "message": message, "request_id": rid}
+    if upgrade_url:
+        error["upgrade_url"] = upgrade_url
+    if retry_after is not None:
+        error["retry_after"] = retry_after
+    headers = {}
+    if retry_after is not None:
+        headers["Retry-After"] = str(retry_after)
+    return JSONResponse(status_code=status, content={"error": error, "request_id": rid}, headers=headers)
+
+
+def _stamp(request: Request, payload: dict) -> dict:
+    rid = _request_id(request)
+    body = dict(payload)
+    body["request_id"] = rid
+    error = body.get("error")
+    if isinstance(error, dict):
+        error = dict(error)
+        error["request_id"] = rid
+        body["error"] = error
+    return body
 
 
 class IdentityMiddleware:
@@ -104,10 +193,24 @@ def create_app(settings: Settings | None = None, service=None) -> FastAPI:
         allow_methods=["GET", "POST", "OPTIONS"],
         allow_headers=["*"],
     )
+    app.add_middleware(RequestIdMiddleware)
 
     @app.get("/health")
-    def health():
-        return service.health()
+    def health(request: Request):
+        body = service.health()
+        body["request_id"] = _request_id(request)
+        return body
+
+    @app.get(
+        "/constitution",
+        response_model=None,
+        responses={200: {"description": "The constitution as markdown, or JSON when Accept is application/json."}},
+    )
+    def constitution(request: Request, format: str = ""):
+        wants_json = format == "json" or "application/json" in (request.headers.get("accept") or "")
+        if wants_json:
+            return _stamp(request, constitution_document())
+        return PlainTextResponse(constitution_markdown(), media_type="text/markdown")
 
     @app.get("/", response_class=HTMLResponse)
     def home():
@@ -136,16 +239,21 @@ def create_app(settings: Settings | None = None, service=None) -> FastAPI:
         intent = gateway.create_checkout(api_key_id="", pack_id=pack_id)
         return JSONResponse(status_code=501, content={"error": {"code": "payment_not_configured", **intent.__dict__}})
 
-    def _run_verify(body: VerifyIn, disconnect_check=None, *, started_at=None, budget=None, on_progress=None):
+    def _limit(body: VerifyIn, request: Request):
         question = (body.question or "").strip() or None
         if not body.text and not body.claims and not question:
-            raise HTTPException(status_code=422, detail="Provide text, claims, or a question.")
-        if body.text and len(body.text) > settings.max_text_chars:
-            raise HTTPException(status_code=422, detail="Text is too long.")
-        if question and len(question) > settings.max_text_chars:
-            raise HTTPException(status_code=422, detail="Question is too long.")
+            return _error(request, 400, "invalid_request", "Provide text, claims, or a question.")
+        if (body.text and len(body.text) > settings.max_text_chars) or (question and len(question) > settings.max_text_chars):
+            return _error(request, 413, "payload_too_large", "Text is too long.")
         if body.claims and len(body.claims) > settings.max_input_claims:
-            raise HTTPException(status_code=422, detail="Too many claims.")
+            return _error(request, 413, "payload_too_large", "Too many claims.")
+        return None
+
+    def _run_verify(body: VerifyIn, request: Request, disconnect_check=None, *, started_at=None, budget=None, on_progress=None):
+        rejected = _limit(body, request)
+        if rejected is not None:
+            return rejected
+        question = (body.question or "").strip() or None
         identity = current_identity()
         try:
             return service.verify(
@@ -159,14 +267,14 @@ def create_app(settings: Settings | None = None, service=None) -> FastAPI:
                 on_progress=on_progress,
             )
         except BillingError as exc:
-            return JSONResponse(status_code=exc.status, content=exc.body())
+            return _error(request, exc.status, exc.code, exc.message, retry_after=exc.retry_after, upgrade_url=exc.upgrade_url)
         except DraftError as exc:
-            return JSONResponse(status_code=503, content=exc.body())
+            payload = exc.body()
+            message = payload.get("error", {}).get("message") if isinstance(payload, dict) else "The draft answer could not be written."
+            return _error(request, 503, "draft_failed", message or "The draft answer could not be written.")
         except Exception:
-            return JSONResponse(
-                status_code=500,
-                content={"error": {"code": "internal_error", "message": "The check failed before a verdict was saved."}},
-            )
+            logger.exception("request_id=%s check failed", _request_id(request))
+            return _error(request, 500, "internal_error", "The check failed before a verdict was saved.")
 
     async def _execute(body: VerifyIn, request: Request):
         disconnected = asyncio.Event()
@@ -183,71 +291,79 @@ def create_app(settings: Settings | None = None, service=None) -> FastAPI:
 
         watcher = asyncio.create_task(watch())
         try:
-            return await asyncio.to_thread(_run_verify, body, disconnected.is_set)
+            return await asyncio.to_thread(_run_verify, body, request, disconnected.is_set)
         finally:
             watcher.cancel()
 
-    @app.post("/v1/verify")
+    @app.post(
+        "/v1/verify",
+        response_model=VerificationOut,
+        responses=_ERROR_RESPONSES,
+        summary="Check text or claims. Each claim uses the field text.",
+    )
     async def verify(body: VerifyIn, request: Request):
-        return await _execute(body, request)
+        """Blocking check. The claim wording is `claims[].text`, not `claim`."""
+        result = await _execute(body, request)
+        if isinstance(result, JSONResponse):
+            return result
+        return _stamp(request, result.model_dump(mode="json", by_alias=True))
 
     def _wants_async(body: VerifyIn, request: Request) -> bool:
         prefer = (request.headers.get("prefer") or "").lower()
         return bool(body.async_job or "respond-async" in prefer)
 
     def _start_job(body: VerifyIn, request: Request):
-        job_id = str(uuid4())
-        service.store.create_job(job_id)
-        identity = current_identity()
-        source_text = (body.question or "").strip() or body.text or "\n".join(body.claims or [])
+        rejected = _limit(body, request)
+        if rejected is not None:
+            return rejected
+        accepted = enqueue_check(
+            service,
+            text=body.text,
+            claims=body.claims,
+            question=(body.question or "").strip() or None,
+            identity=current_identity(),
+            budget=120,
+        )
+        return JSONResponse(status_code=202, content=_stamp(request, accepted))
 
-        def progress(done: int, total: int) -> None:
-            service.store.update_job(job_id, status="running", done=done, total=total)
-
-        def run() -> None:
-            token = set_identity(identity)
-            service.store.update_job(job_id, status="running")
-            try:
-                result = _run_verify(body, None, started_at=time.monotonic(), budget=120, on_progress=progress)
-            except Exception as exc:  # noqa: BLE001 - the job record is the error channel
-                logger.warning("job %s failed %s", job_id, exc.__class__.__name__)
-                service.store.update_job(job_id, status="error", error=exc.__class__.__name__)
-                return
-            finally:
-                reset_identity(token)
-            if isinstance(result, JSONResponse):
-                service.store.update_job(job_id, status="error", error="check_failed")
-                return
-            report = to_check_report(result, source_text)
-            total = len(report.get("claims") or [])
-            service.store.update_job(job_id, status="done", done=total, total=total, report=report)
-
-        threading.Thread(target=run, name=f"factcheck-job-{job_id[:8]}", daemon=True).start()
-        return JSONResponse(status_code=202, content={"job_id": job_id, "status": "queued"})
-
-    @app.post("/check")
+    @app.post(
+        "/check",
+        responses={
+            200: {"model": CheckReportOut, "description": "Site report. Each claim uses the field claim."},
+            202: {"model": JobAccepted, "description": "Async check accepted. Poll GET /v1/jobs/{job_id}."},
+            **_ERROR_RESPONSES,
+        },
+        summary="Check text for the public site. Each claim uses the field claim.",
+    )
     async def check(body: VerifyIn, request: Request):
+        """Blocking report, or 202 when async is true or Prefer is respond-async."""
         if _wants_async(body, request):
             return _start_job(body, request)
         result = await _execute(body, request)
         if isinstance(result, JSONResponse):
             return result
         source_text = (body.question or "").strip() or body.text or "\n".join(body.claims or [])
-        return to_check_report(result, source_text)
+        return _stamp(request, to_check_report(result, source_text))
 
-    @app.get("/v1/jobs/{job_id}")
-    def get_job(job_id: str):
+    @app.get(
+        "/v1/jobs/{job_id}",
+        response_model=JobStatusOut,
+        responses={404: {"model": ErrorResponse, "description": "No job with that id."}, **_ERROR_RESPONSES},
+        summary="Poll an async check.",
+    )
+    def get_job(job_id: str, request: Request):
+        """status is queued, running, done, or error. report uses the /check shape when done."""
         found = service.store.get_job(job_id)
         if found is None:
-            return JSONResponse(status_code=404, content={"error": {"code": "not_found", "message": "No job with that id."}})
-        return found
+            return _error(request, 404, "not_found", "No job with that id.")
+        return _stamp(request, found)
 
-    @app.get("/v1/verification/{verification_id}")
-    def get_verification(verification_id: str):
+    @app.get("/v1/verification/{verification_id}", response_model=VerificationOut, responses={404: {"model": ErrorResponse}})
+    def get_verification(verification_id: str, request: Request):
         found = service.get(verification_id)
         if found is None:
-            return JSONResponse(status_code=404, content={"error": {"code": "not_found", "message": "No verification with that id."}})
-        return found
+            return _error(request, 404, "not_found", "No verification with that id.")
+        return _stamp(request, found.model_dump(mode="json", by_alias=True))
 
     @app.get("/v1/verification/{verification_id}/report", response_class=HTMLResponse)
     def report(verification_id: str):
@@ -256,5 +372,37 @@ def create_app(settings: Settings | None = None, service=None) -> FastAPI:
             return HTMLResponse("<p>No verification with that id.</p>", status_code=404)
         return render_report(found)
 
+    @app.exception_handler(RequestValidationError)
+    async def invalid_body(request: Request, exc: RequestValidationError):
+        del exc
+        return _error(request, 400, "invalid_request", "The request body is not valid.")
+
+    def openapi():
+        if app.openapi_schema:
+            return app.openapi_schema
+        schema = get_openapi(
+            title=settings.service_name,
+            version="5",
+            description=(
+                "Fact-checking for agents. Send a paid key as Authorization: Bearer or X-API-Key. "
+                "The first check is free. POST /v1/verify uses claims[].text. POST /check uses claims[].claim."
+            ),
+            routes=app.routes,
+        )
+        components = schema.setdefault("components", {})
+        components["securitySchemes"] = {
+            "BearerAuth": {"type": "http", "scheme": "bearer", "description": "Authorization: Bearer <api key>"},
+            "ApiKeyAuth": {"type": "apiKey", "in": "header", "name": "X-API-Key"},
+        }
+        for path, methods in schema.get("paths", {}).items():
+            if path not in {"/check", "/v1/verify", "/v1/jobs/{job_id}", "/v1/verification/{verification_id}"}:
+                continue
+            for operation in methods.values():
+                if isinstance(operation, dict):
+                    operation["security"] = [{}, {"BearerAuth": []}, {"ApiKeyAuth": []}]
+        app.openapi_schema = schema
+        return schema
+
+    app.openapi = openapi
     app.mount("/", mcp_app)
     return app

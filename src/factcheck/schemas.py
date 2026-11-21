@@ -186,6 +186,7 @@ class VerificationOut(BaseModel):
     upgrade_url: str
     warnings: list[str] = Field(default_factory=list)
     review: ReviewOut = Field(default_factory=ReviewOut)
+    request_id: str = ""
 
 
 class VerifyIn(BaseModel):
@@ -194,6 +195,82 @@ class VerifyIn(BaseModel):
     claims: list[str] | None = None
     question: str | None = None
     async_job: bool = Field(default=False, alias="async")
+
+
+class ErrorDetail(BaseModel):
+    code: str
+    message: str
+    upgrade_url: str | None = None
+    retry_after: int | None = None
+    request_id: str = ""
+
+
+class ErrorResponse(BaseModel):
+    """Error body for 400, 401, 402, 413, 429, and 5xx responses."""
+
+    error: ErrorDetail
+    request_id: str = ""
+
+
+class CheckSourceOut(BaseModel):
+    """One source on POST /check. The claim text itself is the sibling field `claim`, not `text`."""
+
+    url: str
+    title: str
+    domain: str
+    checked_on: str
+    published_date: str | None = None
+    quote: str = ""
+    source_type: str
+
+
+class CheckClaimOut(BaseModel):
+    claim: str
+    claim_type: str
+    claim_category: str
+    verdict: str
+    verdict_label: str = ""
+    span: str = ""
+    strength_of_support: float = 0.0
+    checked_at: str = ""
+    would_settle: str = ""
+    sources: list[CheckSourceOut] = Field(default_factory=list)
+    mainstream_check: dict | None = None
+    start: int | None = None
+    end: int | None = None
+
+
+class CheckReportOut(BaseModel):
+    """POST /check success body. Each item uses `claim`. POST /v1/verify uses `text` on VerificationOut."""
+
+    input_text: str
+    claims: list[CheckClaimOut]
+    mode: Literal["question", "text"] = "text"
+    draft_answer: DraftAnswer | None = None
+    synopsis: SynopsisOut
+    review: ReviewOut
+    usage: UsageOut
+    request_id: str = ""
+
+
+class JobAccepted(BaseModel):
+    job_id: str
+    status: Literal["queued"] = "queued"
+    request_id: str = ""
+
+
+class JobProgress(BaseModel):
+    done: int = 0
+    total: int = 0
+
+
+class JobStatusOut(BaseModel):
+    job_id: str
+    status: Literal["queued", "running", "done", "error"]
+    progress: JobProgress
+    report: CheckReportOut | None = None
+    error: str | None = None
+    request_id: str = ""
 
 
 DISCLAIMER = (

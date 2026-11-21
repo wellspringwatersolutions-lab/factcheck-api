@@ -53,7 +53,10 @@ def build_mcp(service) -> MCPServer:
         "Opinions return what mainstream fact-checkers say, which is not a true or false label. "
         "Hypotheses are not called true or false. "
         f"{DISCLAIMER} "
-        "The first check from a client is free. Send a paid key as Authorization: Bearer <key> or X-API-Key."
+        "The first check from a client is free. Send a paid key as Authorization: Bearer <key> or X-API-Key. "
+        "verify_text and verify_claims block until the check finishes. "
+        "start_check returns a job_id immediately, and get_job polls status, progress, and the report. "
+        "An async job is allowed 120 seconds."
     )
     mcp = MCPServer(SERVICE_NAME, instructions=instructions)
 
@@ -85,6 +88,46 @@ def build_mcp(service) -> MCPServer:
         ],
     ) -> str:
         return await _verify(service, text=None, claims=claims)
+
+    @mcp.tool(
+        description=(
+            "Start a check and return immediately with job_id and status queued. "
+            "Does not block. Poll get_job for status, progress, and the report. "
+            "The job budget is 120 seconds. Send text, or claims, or both. "
+            "Same free-tier rules as verify_text."
+        )
+    )
+    async def start_check(
+        text: Annotated[str, Field(description="Passage to check. Send an empty string when claims are sent.", max_length=20000)],
+        claims: Annotated[
+            list[Annotated[str, Field(min_length=1)]],
+            Field(description="Claims to check. Empty when text is sent.", max_length=20),
+        ] | None = None,
+    ) -> str:
+        from factcheck.jobs import enqueue_check
+
+        cleaned = [item.strip() for item in (claims or []) if item and item.strip()]
+        if not text.strip() and not cleaned:
+            raise ToolError(json.dumps({"error": {"code": "invalid_request", "message": "Provide text or claims."}}))
+        identity = current_identity()
+        accepted = await anyio.to_thread.run_sync(
+            lambda: enqueue_check(service, text=text.strip() or None, claims=cleaned or None, question=None, identity=identity, budget=120)
+        )
+        return json.dumps(accepted, ensure_ascii=False)
+
+    @mcp.tool(
+        description=(
+            "Poll a check started by start_check. Returns status (queued, running, done, or error), "
+            "progress with done and total, and report when the job is done. Does not spend a check."
+        )
+    )
+    async def get_job(
+        job_id: Annotated[str, Field(description="job_id returned by start_check", min_length=8)],
+    ) -> str:
+        found = await anyio.to_thread.run_sync(service.store.get_job, job_id)
+        if found is None:
+            raise ToolError(json.dumps({"error": {"code": "not_found", "message": "No job with that id."}}))
+        return json.dumps(found, ensure_ascii=False)
 
     @mcp.tool(description="Fetch a stored verification by id. Does not spend a free check or credits.")
     async def get_verification(

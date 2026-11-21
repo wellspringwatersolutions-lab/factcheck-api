@@ -24,6 +24,27 @@ def _cost_header(response: httpx.Response) -> float:
         return 0.0
 
 
+class _BudgetedClient:
+    """Every Desearch HTTP call, including a copied call path, shares one counter."""
+
+    def __init__(self, client: httpx.Client, owner: "DesearchRetriever"):
+        self._client = client
+        self._owner = owner
+
+    def request(self, method: str, url: str, **kwargs):
+        if not reserve_retrieval(getattr(self._owner, "_budget", None)):
+            logger.warning("desearch call cap reached before %s", url)
+            return httpx.Response(429, request=httpx.Request(method, url), json={"error": "call_cap"})
+        self._owner.retrieval_calls += 1
+        return self._client.request(method, url, **kwargs)
+
+    def get(self, url: str, **kwargs):
+        return self.request("GET", url, **kwargs)
+
+    def post(self, url: str, **kwargs):
+        return self.request("POST", url, **kwargs)
+
+
 class DesearchRetriever:
     """GET /web for search and GET /web/extract for page text. /web/crawl is the legacy alias."""
 
@@ -33,7 +54,8 @@ class DesearchRetriever:
     def __init__(self, api_key: str, base_url: str = "https://api.desearch.ai", client: httpx.Client | None = None):
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
-        self.client = client or httpx.Client(timeout=8.0)
+        self._http = client or httpx.Client(timeout=8.0)
+        self.client = _BudgetedClient(self._http, self)
         self.cost_usd = 0.0
         self.retrieval_calls = 0
         self._budget = None
@@ -46,12 +68,10 @@ class DesearchRetriever:
 
     def _exchange(self, method: str, url: str, *, budget, **kwargs):
         """One attempt, then one retry on a timeout or a 5xx. Each attempt counts toward the cap."""
+        if budget is not None:
+            self._budget = budget
 
         def once():
-            if not reserve_retrieval(budget if budget is not None else getattr(self, "_budget", None)):
-                logger.warning("desearch call cap reached before %s", url)
-                return None
-            self.retrieval_calls += 1
             try:
                 return self.client.request(method, url, **kwargs)
             except httpx.TimeoutException:

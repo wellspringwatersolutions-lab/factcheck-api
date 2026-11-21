@@ -82,7 +82,9 @@ def encyclopedia_role_check(claim: str, passage: str) -> tuple[str, str] | None:
     if not re.search(r"\b(president|general|commander|king|queen|office)\b", claim or "", re.I):
         return None
     claim_role = _role_text(claim)
-    for sentence in re.split(r"(?<=[.!?])\s+", passage or ""):
+    from factcheck.textutil import split_sentences
+
+    for sentence in split_sentences(passage or ""):
         sentence = sentence.strip()
         if not sentence or overlap(claim_role, _role_text(sentence)) < 0.45:
             continue

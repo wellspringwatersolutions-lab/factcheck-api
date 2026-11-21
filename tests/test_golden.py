@@ -242,7 +242,11 @@ def test_long_paste_rating_names_what_was_confirmed():
     synopsis = build_synopsis(rows)
     assert synopsis.rating in {"Mostly accurate", "Partly verified"}
     assert "has not told" in synopsis.summary or "has not told" in synopsis.tldr
+    assert synopsis.summary.lower().startswith("partly verified") or synopsis.summary.lower().startswith("mostly accurate") or "has not told" in synopsis.summary
+    assert "Claims about" in synopsis.summary
     assert "could not be confirmed" in synopsis.summary
+    assert "'AI apocalypse' could not be confirmed" not in synopsis.summary
+    assert not synopsis.tldr.rstrip(".").endswith("U.S")
     assert synopsis.rating != "Not enough evidence"
 
 
@@ -278,6 +282,144 @@ def test_extraction_is_pinned_to_qwen_then_deepseek_and_startup_hides_the_google
     create_app(settings=settings)
     assert "google fact-check retriever enabled" in caplog.text
     assert "secret-key" not in caplog.text
+
+
+def test_abbreviations_stay_inside_the_sentence_and_the_tldr():
+    from factcheck.textutil import split_sentences
+
+    text = (
+        "The story traces to a Pentagon initiative ordering major U.S. commands to stock supplies. "
+        "Dr. Ng told the U.K. and the E.U. on Jan. 4, e.g. the St. Louis plan vs. Inc. No. 12. "
+        "J. Q. Adams was president."
+    )
+    parts = split_sentences(text)
+    assert parts[0].endswith("supplies.")
+    assert "U.S. commands" in parts[0]
+    assert any("U.K." in part and "E.U." in part and "Jan." in part for part in parts)
+    assert any(part.startswith("J. Q. Adams") for part in parts)
+    rows = [
+        ClaimOut(
+            text="A Pentagon initiative ordering major U.S. commands to stock supplies was misread as a civilian hoard order.",
+            claim_type="fact",
+            claim_category="T6",
+            verdict="likely_true",
+            strength_of_support=0.6,
+            confidence=0.6,
+            reasoning="The order was misread.",
+        ),
+        ClaimOut(
+            text="Europe's updated preparedness guidance is real.",
+            claim_type="fact",
+            claim_category="T6",
+            verdict="likely_true",
+            strength_of_support=0.6,
+            confidence=0.6,
+            reasoning="Official guidance.",
+        ),
+        ClaimOut(
+            text="The 'AI apocalypse' starts next week.",
+            claim_type="fact",
+            claim_category="T6",
+            verdict="Unverified",
+            strength_of_support=0.15,
+            confidence=0.15,
+            reasoning="No passage.",
+        ),
+    ]
+    synopsis = build_synopsis(rows)
+    assert "U.S. commands" in synopsis.summary
+    assert not synopsis.tldr.rstrip(".").endswith("U.S")
+    assert "U.S." not in synopsis.tldr or "commands" in synopsis.tldr
+    assert synopsis.summary.lower().index("u.s.") < synopsis.summary.lower().index("claims about")
+    assert "Claims about AI apocalypse could not be confirmed." in synopsis.summary
+    assert "'AI apocalypse' could not be confirmed." not in synopsis.summary
+
+
+def test_unrelated_pages_are_dropped_and_encyclopedia_quotes_are_shared():
+    from factcheck.orchestrator import _share_factchecks
+    from factcheck.schemas import SourceOut
+
+    service, _, _, _ = make_service()
+    claim = ExtractedClaim(text="In October 2026 a European supermarket refrigeration cyberattack knocked freezers offline.")
+    hits = _hits(
+        [
+            {
+                "url": "https://en.wikipedia.org/wiki/French_protests",
+                "title": "French protests",
+                "grade": "B",
+                "source_type": "encyclopedia",
+                "text": "Street protests and bomb threats disrupted French cities.",
+            },
+            {
+                "url": "https://www.bbc.com/news/freezer-hack",
+                "title": "Freezer hack",
+                "grade": "B",
+                "source_type": "secondary",
+                "text": "In October 2026 a European supermarket refrigeration cyberattack knocked freezers offline.",
+            },
+        ]
+    )
+    kept = service._select(claim, hits)
+    assert [hit.url for hit in kept] == ["https://www.bbc.com/news/freezer-hack"]
+    quote = "John Adams was a Founding Father, the first vice president, and the second president."
+    president = ClaimOut(
+        text="John Adams was the second president.",
+        claim_type="fact",
+        claim_category="T5",
+        verdict="Supported",
+        strength_of_support=0.8,
+        confidence=0.8,
+        reasoning="Wikipedia states the office.",
+        sources=[
+            SourceOut(
+                url="https://en.wikipedia.org/wiki/John_Adams",
+                title="John Adams",
+                snippet=quote,
+                quote=quote,
+                grade="B",
+                stance="supports",
+                source_type="encyclopedia",
+                entailment="entails",
+            )
+        ],
+    )
+    founder = ClaimOut(
+        text="John Adams was a Founding Father.",
+        claim_type="fact",
+        claim_category="T5",
+        verdict="Unverified",
+        strength_of_support=0.15,
+        confidence=0.15,
+        reasoning="No retrieved passage backs this claim.",
+    )
+    _share_factchecks([president, founder])
+    assert founder.verdict in {"Supported", "likely_true"}
+    assert any("wikipedia.org" in source.url for source in founder.sources)
+
+
+def test_parallel_claims_stop_at_sixty_desearch_calls():
+    import httpx
+
+    from factcheck.retrievers import CompositeRetriever, DesearchRetriever
+
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        if request.url.path.endswith("/extract"):
+            return httpx.Response(200, text="A page about a distinct event.")
+        return httpx.Response(200, json={"data": [], "results": []})
+
+    desearch = DesearchRetriever("test-key", client=httpx.Client(transport=httpx.MockTransport(handler)))
+    service, _, _, cfg = make_service()
+    service.retriever = CompositeRetriever([desearch])
+    cfg.max_output_claims = 80
+    cfg.max_checked_claims = 80
+    cfg.check_concurrency = 8
+    claims = [f"Alpha{i} beta{i} claimed that gamma{i} happened in city{i} during year{i}." for i in range(80)]
+    result = service.verify(text=None, claims=claims, client=client(), charge=False, budget=20)
+    assert len(calls) == 60
+    assert result.usage.retrieval_calls == 60
 
 
 def test_one_desearch_cap_covers_web_search_and_dated_search():

@@ -14,15 +14,19 @@ from factcheck.storage import ApiKeyRow, CreditLedgerRow, FreeCheckRow, hash_key
 
 
 class BillingError(Exception):
-    def __init__(self, code: str, message: str, status: int, upgrade_url: str):
+    def __init__(self, code: str, message: str, status: int, upgrade_url: str, retry_after: int | None = None):
         super().__init__(message)
         self.code = code
         self.message = message
         self.status = status
         self.upgrade_url = upgrade_url
+        self.retry_after = retry_after
 
     def body(self) -> dict:
-        return {"error": {"code": self.code, "message": self.message, "upgrade_url": self.upgrade_url}}
+        error = {"code": self.code, "message": self.message, "upgrade_url": self.upgrade_url}
+        if self.retry_after is not None:
+            error["retry_after"] = self.retry_after
+        return {"error": error}
 
 
 def resolve_client_ip(headers: dict[str, str], peer: str | None) -> str:
@@ -97,7 +101,13 @@ class BillingGate:
             if row is None:
                 raise BillingError("invalid_api_key", "Unknown API key.", 401, self.settings.resolved_upgrade_url())
             if row.credits + 1e-9 < self.settings.credits_per_check:
-                raise BillingError("insufficient_credits", self._upgrade("credits"), 402, self.settings.resolved_upgrade_url())
+                raise BillingError(
+                    "insufficient_credits",
+                    self._upgrade("credits"),
+                    402,
+                    self.settings.resolved_upgrade_url(),
+                    retry_after=3600,
+                )
             return Reservation(kind="paid", api_key_id=row.id)
 
     def _spend_would_exceed(self, session, today: str) -> bool:
@@ -119,7 +129,7 @@ class BillingGate:
         today = datetime.now(timezone.utc).date().isoformat()
         with self._lock, self.factory() as session:
             if self._spend_would_exceed(session, today):
-                raise BillingError("spend_cap_exceeded", self._upgrade("cap"), 429, self.settings.resolved_upgrade_url())
+                raise BillingError("spend_cap_exceeded", self._upgrade("cap"), 429, self.settings.resolved_upgrade_url(), retry_after=3600)
             fingerprint = f"owner:{uuid4()}"
             session.add(
                 FreeCheckRow(
@@ -138,7 +148,7 @@ class BillingGate:
         fingerprint = client.fingerprint
         with self._lock, self.factory() as session:
             if self._spend_would_exceed(session, today):
-                raise BillingError("spend_cap_exceeded", self._upgrade("cap"), 429, self.settings.resolved_upgrade_url())
+                raise BillingError("spend_cap_exceeded", self._upgrade("cap"), 429, self.settings.resolved_upgrade_url(), retry_after=3600)
             existing = session.get(FreeCheckRow, fingerprint)
             if existing is not None:
                 created = existing.created_at
@@ -150,7 +160,13 @@ class BillingGate:
                     session.delete(existing)
                     session.commit()
                 else:
-                    raise BillingError("free_tier_exhausted", self._upgrade("free"), 402, self.settings.resolved_upgrade_url())
+                    raise BillingError(
+                        "free_tier_exhausted",
+                        self._upgrade("free"),
+                        402,
+                        self.settings.resolved_upgrade_url(),
+                        retry_after=3600,
+                    )
             session.add(
                 FreeCheckRow(
                     fingerprint=fingerprint,
@@ -180,7 +196,13 @@ class BillingGate:
             with self._lock, self.factory() as session:
                 row = session.get(ApiKeyRow, reservation.api_key_id)
                 if row is None or row.credits + 1e-9 < self.settings.credits_per_check:
-                    raise BillingError("insufficient_credits", self._upgrade("credits"), 402, self.settings.resolved_upgrade_url())
+                    raise BillingError(
+                        "insufficient_credits",
+                        self._upgrade("credits"),
+                        402,
+                        self.settings.resolved_upgrade_url(),
+                        retry_after=3600,
+                    )
                 row.credits -= self.settings.credits_per_check
                 session.add(
                     CreditLedgerRow(

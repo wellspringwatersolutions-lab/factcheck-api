@@ -1,4 +1,8 @@
-"""Payment stubs. Stripe credit packs and TAO deposits are not wired."""
+"""Payment stubs. Stripe credit packs and TAO deposits are not wired.
+
+TODO: paid credit packs and checkout for outside agents. Do not build that flow
+until the owner asks for it. These classes stay unwired on purpose.
+"""
 
 from __future__ import annotations
 

@@ -199,7 +199,9 @@ def apply_debunk_labels(claim_text: str, passages: list[Evidence]) -> list[Evide
 
 
 def best_passage(page: str, claim: str, limit: int = 420) -> str:
-    parts = re.split(r"(?<=[.!?])\s+|\n+", page or "")
+    from factcheck.textutil import split_sentences
+
+    parts = split_sentences(page or "")
     parts = [part.strip() for part in parts if part.strip()]
     if not parts:
         return (page or "")[:limit]
@@ -284,7 +286,9 @@ def quantity_conflict(claim: str, passage: str) -> str | None:
     claimed = extract_lengths(claim)
     if not claimed or overlap(claim, passage) < 0.2:
         return None
-    sentences = [part.strip() for part in re.split(r"(?<=[.!?])\s+|\n+", passage or "") if part.strip()]
+    from factcheck.textutil import split_sentences
+
+    sentences = split_sentences(passage or "")
     for sentence in sentences or [passage]:
         if overlap(claim, sentence) < 0.2:
             continue
@@ -306,7 +310,9 @@ _CHROME = re.compile(
 def best_passages(page: str, claim: str, title: str = "", limit: int = 3) -> list[str]:
     """The passages that actually discuss the claim, not the title or a dateline."""
     cleaned = clean_html(page or "")
-    chunks = [part.strip() for part in re.split(r"\n+|(?<=[.!?])\s+", cleaned) if part.strip()]
+    from factcheck.textutil import split_sentences
+
+    chunks = split_sentences(cleaned)
     title_key = " ".join((title or "").lower().split())
     scored: list[tuple[float, str]] = []
     for chunk in chunks:
@@ -324,7 +330,9 @@ def best_passages(page: str, claim: str, title: str = "", limit: int = 3) -> lis
 
 def split_passages(text: str, limit: int = 6) -> list[str]:
     cleaned = clean_html(text or "")
-    parts = [part.strip() for part in re.split(r"\n+|(?<=[.!?])\s+", cleaned) if part.strip()]
+    from factcheck.textutil import split_sentences
+
+    parts = split_sentences(cleaned)
     chunks: list[str] = []
     buffer = ""
     for part in parts:

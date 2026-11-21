@@ -14,7 +14,35 @@ STOP = {
     "over", "after", "before", "about", "not", "no", "than", "then", "also",
 }
 
-_SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+(?=[A-Z\"“])")
+# Longest first so "U.S." is protected before a single initial.
+_ABBREVIATIONS = (
+    "U.S.A.",
+    "U.S.",
+    "U.K.",
+    "E.U.",
+    "Mrs.",
+    "Mr.",
+    "Ms.",
+    "Dr.",
+    "St.",
+    "Jan.",
+    "Feb.",
+    "Mar.",
+    "Apr.",
+    "Jun.",
+    "Jul.",
+    "Aug.",
+    "Sept.",
+    "Sep.",
+    "Oct.",
+    "Nov.",
+    "Dec.",
+    "e.g.",
+    "i.e.",
+    "vs.",
+    "Inc.",
+    "No.",
+)
 _TOKEN = re.compile(r"[a-z0-9]+")
 _NEGATION = re.compile(
     r"\b(not|no|never|n't|without|neither|nor|fails?|failed|unable|refute[sd]?|"
@@ -66,15 +94,54 @@ def normalize_text(text: str) -> str:
     return " ".join(text.lower().split())
 
 
+def _protect_abbreviations(text: str) -> tuple[str, list[tuple[str, str]]]:
+    """Hide periods that do not end a sentence, including initials like J. Q."""
+    replacements: list[tuple[str, str]] = []
+
+    def mark(original: str) -> str:
+        token = f"\uE000{len(replacements)}\uE001"
+        replacements.append((token, original))
+        return token
+
+    for abbr in _ABBREVIATIONS:
+        if abbr in text:
+            text = text.replace(abbr, mark(abbr))
+    text = re.sub(r"\bMay\.(?=\s+\d)", lambda match: mark(match.group(0)), text)
+    text = re.sub(r"\b[A-Z]\.", lambda match: mark(match.group(0)), text)
+    return text, replacements
+
+
+def _restore_abbreviations(text: str, replacements: list[tuple[str, str]]) -> str:
+    for token, original in replacements:
+        text = text.replace(token, original)
+    return text
+
+
 def split_sentences(text: str) -> list[str]:
-    """Split lines first so a table row or list item is not glued to the next one."""
+    """Split lines first so a table row or list item is not glued to the next one.
+
+    Periods in U.S., U.K., E.U., titles, months, e.g., i.e., vs., Inc., No., and
+    initials stay inside the sentence.
+    """
     found: list[str] = []
     for raw in (text or "").splitlines() or [text or ""]:
         cleaned = " ".join(raw.split())
         if not cleaned:
             continue
-        parts = _SENTENCE_SPLIT.split(cleaned)
-        found.extend(part.strip() for part in parts if part.strip())
+        protected, replacements = _protect_abbreviations(cleaned)
+        # Split on every sentence mark. A protected abbreviation is no longer a mark,
+        # and a following placeholder may not be a capital letter until it is restored.
+        parts = re.split(r"(?<=[.!?])\s+", protected)
+        built: list[str] = []
+        for part in parts:
+            restored = _restore_abbreviations(part, replacements).strip()
+            if not restored:
+                continue
+            if built and restored[0].islower():
+                built[-1] = f"{built[-1]} {restored}"
+            else:
+                built.append(restored)
+        found.extend(built)
     return found
 
 

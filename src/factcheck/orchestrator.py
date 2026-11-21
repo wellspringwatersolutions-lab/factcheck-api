@@ -30,8 +30,16 @@ from factcheck.request_ctx import (
     retrieval_calls,
     set_phase,
 )
-from factcheck.checks import apply_debunk_labels, is_debunk
-from factcheck.retain import drop_invented_negative, entity_mismatch, blocked_site, is_fact_checker, screen_hits
+from factcheck.checks import apply_debunk_labels, entailment, is_debunk
+from factcheck.retain import (
+    blocked_site,
+    drop_invented_negative,
+    entity_mismatch,
+    is_fact_checker,
+    is_official,
+    person_names,
+    screen_hits,
+)
 from factcheck.compute import recompute
 from factcheck.credibility import annotate, dedupe_syndicated, dedupe_urls, drop_circular
 from factcheck.judge import apply_verified_labels
@@ -57,13 +65,28 @@ from factcheck.types import Evidence, ExtractedClaim, UsageMeter
 logger = logging.getLogger("factcheck")
 
 
+def _same_person(claim: str, quote: str) -> bool:
+    names = person_names(claim)
+    if not names:
+        return True
+    haystack = (quote or "").lower()
+    return any(name.lower() in haystack for name in names)
+
+
+def _encyclopedia_source(source) -> bool:
+    if source.source_type == "encyclopedia":
+        return True
+    url = (source.url or "").lower()
+    return "wikipedia.org" in url or "britannica.com" in url
+
+
 def _share_factchecks(claims: list[ClaimOut]) -> None:
-    """A fact-checker debunk found for one claim can back a related claim in the same check."""
+    """A fact-checker or encyclopedia quote found for one claim can back a related claim."""
     pool = []
     for claim in claims:
         for source in claim.sources:
             text = source.quote or source.snippet or ""
-            if is_fact_checker(source.url, source.source_type) or is_debunk(text):
+            if is_fact_checker(source.url, source.source_type) or is_debunk(text) or _encyclopedia_source(source):
                 pool.append(source)
     for claim in claims:
         if claim.claim_type != "fact" or claim.verdict in {"Supported", "Contradicted"}:
@@ -73,7 +96,12 @@ def _share_factchecks(claims: list[ClaimOut]) -> None:
         for source in pool:
             if source.url in have:
                 continue
-            if overlap(claim.text, source.quote or source.snippet or "") < 0.2:
+            quoted = source.quote or source.snippet or ""
+            if overlap(claim.text, quoted) < 0.2:
+                continue
+            if _encyclopedia_source(source) and not _same_person(claim.text, quoted):
+                continue
+            if _encyclopedia_source(source) and not is_debunk(quoted) and entailment(claim.text, quoted) != "entails":
                 continue
             extras.append(source)
             have.add(source.url)
@@ -91,7 +119,7 @@ def _share_factchecks(claims: list[ClaimOut]) -> None:
                     page_text=text,
                     grade=source.grade or "B",
                     source_type=source.source_type or "fact_checker",
-                    entailment="entails" if is_debunk(text) else (source.entailment or "neutral"),
+                    entailment="entails" if is_debunk(text) or _encyclopedia_source(source) else (source.entailment or "neutral"),
                     used=True,
                     origin_id=source.origin_id or source.url,
                 )
@@ -428,6 +456,7 @@ class VerificationService:
                 extracted = extracted[: self.settings.max_output_claims]
                 warnings.append("claim_limit")
             outputs = self._run(extracted, meter, warnings, deadline - 16)
+            meter.retrieval_calls = retrieval_calls()
             _share_factchecks(outputs)
             payload = self._assemble(
                 asked or text,
@@ -666,7 +695,6 @@ class VerificationService:
         limit = EFFORT_LIMITS[effort]["search"]
         scientific = any(claim.scientific or claim.claim_category in {"T2", "T3", "T4"} for claim in claims)
         categories = [claim.claim_category for claim in claims]
-        before_calls = retrieval_calls()
         t_retrieve = time.monotonic()
         hits = []
         seen_urls: set[str] = set()
@@ -701,7 +729,7 @@ class VerificationService:
                 seen_urls.add(key)
                 hits.append(hit)
         add_phase("retrieve", time.monotonic() - t_retrieve)
-        meter.retrieval_calls += max(0, retrieval_calls() - before_calls)
+        meter.retrieval_calls = retrieval_calls()
         warnings.extend(getattr(self.retriever, "warnings", [])[-3:])
         hits = dedupe_urls(hits)
         draft = current_request().draft_text if current_request() is not None else ""
@@ -812,9 +840,14 @@ class VerificationService:
         return resolved
 
     def _select(self, claim: ExtractedClaim, hits: list[Evidence]) -> list[Evidence]:
-        ranked = sorted(hits, key=lambda hit: overlap(claim.text, f"{hit.title} {hit.page_text or hit.snippet}"), reverse=True)
+        ranked = sorted(hits, key=lambda hit: overlap(claim.text, f"{hit.title} {hit.page_text or hit.snippet} {hit.quote}"), reverse=True)
         chosen = []
-        for hit in ranked[:5]:
+        for hit in ranked:
+            blob = " ".join(part for part in (hit.title, hit.page_text, hit.snippet, hit.quote) if part)
+            score = overlap(claim.text, blob)
+            floor = 0.12 if is_fact_checker(hit.url, hit.source_type) or is_official(hit.url) else 0.2
+            if score < floor:
+                continue
             cloned = Evidence(**{key: getattr(hit, key) for key in hit.__dataclass_fields__})
             apply_passage_checks(claim.text, cloned, type("R", (), {
                 "ok": hit.url_status == 200 or hit.url.startswith(("scifact://", "fever://", "heldout://", "corpus://")),
