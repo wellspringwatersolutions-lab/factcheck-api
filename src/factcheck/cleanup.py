@@ -72,9 +72,26 @@ def answer_text(text: str) -> str:
     return dialogue.answer if dialogue else (text or "")
 
 
+_QUESTION_START = re.compile(
+    r"^(was|were|is|are|am|did|does|do|has|have|had|can|could|will|would|should|shall|may|might|must|"
+    r"who|what|when|where|why|how|which|whose|whom|isn't|wasn't|didn't|doesn't|aren't|weren't|"
+    r"true or false|is it true)\b",
+    re.IGNORECASE,
+)
+
+
 def is_bare_question(text: str | None) -> bool:
-    """A short question with no answer attached. A pasted answer that ends in '?' is not one."""
+    """A short question with no answer attached. A pasted answer that ends in '?' is not one.
+
+    Also accepts a short question typed without a question mark, e.g.
+    "was George Washington a criminal".
+    """
     cleaned = " ".join((text or "").split())
+    if cleaned and not cleaned.endswith("?") and "?" not in cleaned:
+        body = cleaned.rstrip(" .")
+        if re.search(r"[.!]", body) or not _QUESTION_START.match(body):
+            return False
+        return 3 <= len(body.split()) <= 25
     if not cleaned.endswith("?") or cleaned.count("?") != 1:
         return False
     body = cleaned[:-1].strip()
