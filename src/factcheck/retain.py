@@ -218,6 +218,13 @@ def screen_hits(
             hit.url,
             hit.published_at or "",
         )
+        if "wikipedia.org" in (hit.url or ""):
+            logger.warning(
+                "wikipedia dated event dropped claim=%r url=%s reason=%s",
+                (claim or "")[:160],
+                hit.url,
+                reason,
+            )
 
     for hit in hits:
         key = (hit.url or "").split("#")[0].rstrip("/").lower()
@@ -271,6 +278,13 @@ def screen_hits(
         if hit.grade in {"A", "B"} or is_official(hit.url) or is_fact_checker(hit.url, hit.source_type)
     ]
     if reputable:
+        for hit in kept:
+            if "wikipedia.org" in (hit.url or "") and hit not in reputable:
+                logger.warning(
+                    "wikipedia dated event dropped claim=%r url=%s reason=stronger_source_present",
+                    (claim or "")[:160],
+                    hit.url,
+                )
         kept = reputable
     kept = kept[:4]
     logger.warning(

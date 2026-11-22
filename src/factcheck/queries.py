@@ -155,6 +155,27 @@ def _join(words: list[str], limit: int = 8) -> str:
     return " ".join(seen)
 
 
+def wikipedia_event_query(text: str) -> str:
+    """Key nouns plus the month and year, for a dated event. Empty when there is no month and year."""
+    tokens = _TOKEN.findall(text or "")
+    month = ""
+    year = ""
+    for token in tokens:
+        if not month and _month_in_token(token):
+            piece = next(part for part in re.split(r"[-/]", token) if _month_in_token(part))
+            month = piece[:1].upper() + piece[1:].lower()
+        if not year and _YEAR.fullmatch(token):
+            year = token
+    if not month or not year:
+        return ""
+    nouns = [
+        token
+        for token in _content_tokens(text)
+        if not _YEAR.fullmatch(token) and _month_in_token(token) is None
+    ]
+    return _join([month, year, *nouns], limit=8)
+
+
 def heuristic_queries(text: str) -> list[str]:
     """Keyword queries in claim order. Drops 'In' and stray small numbers."""
     content = _content_tokens(text)

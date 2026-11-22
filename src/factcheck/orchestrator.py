@@ -18,7 +18,7 @@ from factcheck.categories import CATEGORIES, EFFORT_LIMITS, effort_for, is_math,
 from factcheck.checks import UrlChecker, apply_passage_checks, passage_check_rows
 from factcheck.cleanup import focus_query, is_bare_question, peel_leading_question, priority, split_dialogue, strip_labels
 from factcheck.extract import fallback_points, heuristic_extract, select_key_points, standalone_claim
-from factcheck.queries import heuristic_queries, news_window
+from factcheck.queries import heuristic_queries, news_window, wikipedia_event_query
 from factcheck.request_ctx import (
     add_phase,
     begin_request,
@@ -535,6 +535,20 @@ class VerificationService:
             checked_at=datetime.now(timezone.utc).isoformat(),
         )
 
+    def _dated_wikipedia(self, text: str) -> list:
+        query = wikipedia_event_query(text)
+        if not query:
+            return []
+        wiki = getattr(getattr(self.retriever, "references", None), "wikipedia", None)
+        if wiki is None or not hasattr(wiki, "search_dated_event"):
+            logger.warning(
+                "wikipedia dated event dropped claim=%r query=%s reason=no_wikipedia_retriever",
+                (text or "")[:160],
+                query,
+            )
+            return []
+        return list(wiki.search_dated_event(text) or [])
+
     def _search_queries(self, text: str) -> list[str]:
         writer = getattr(self, "query_writer", None)
         if writer is not None:
@@ -713,6 +727,7 @@ class VerificationService:
                     budget=current_request(),
                 )
             )
+            found.extend(self._dated_wikipedia(claim.text))
             kept, reasons = screen_hits(claim.text, found, window, context=(current_request().question if current_request() else ""))
             logger.warning(
                 "retrieval claim=%r queries=%s returned=%d kept=%d drops=%s",

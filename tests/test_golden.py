@@ -241,13 +241,78 @@ def test_long_paste_rating_names_what_was_confirmed():
     ]
     synopsis = build_synopsis(rows)
     assert synopsis.rating in {"Mostly accurate", "Partly verified"}
-    assert "has not told" in synopsis.summary or "has not told" in synopsis.tldr
-    assert synopsis.summary.lower().startswith("partly verified") or synopsis.summary.lower().startswith("mostly accurate") or "has not told" in synopsis.summary
-    assert "Claims about" in synopsis.summary
+    assert synopsis.tldr == "The U.S. government has not told civilians to hoard 90 days of food."
     assert "could not be confirmed" in synopsis.summary
-    assert "'AI apocalypse' could not be confirmed" not in synopsis.summary
-    assert not synopsis.tldr.rstrip(".").endswith("U.S")
+    assert "Claims about" not in synopsis.summary
     assert synopsis.rating != "Not enough evidence"
+
+
+def test_fortress_run_fallback_tldr_is_the_hoard_denial():
+    fortress = (
+        "That rumor blew up on TikTok and Facebook after Defense Secretary Pete Hegseth announced "
+        "FORTRESS America, a Pentagon initiative ordering major U.S. military bases to become capable "
+        "of operating off-grid for 90 days in case."
+    )
+    denial = "The U.S. government has not told civilians to hoard 90 days of food."
+    hack = "In mid-October 2026 a European supermarket refrigeration cyberattack knocked freezers offline."
+    apocalypse = 'Grid failures aren\'t pointing to a single imminent "AI apocalypse".'
+    aging = "Aging power grids increasingly failing is a separate infrastructure problem."
+    assisted = "AI-assisted cyberattacks on critical infrastructure are increasing."
+    rows = [
+        ClaimOut(text=fortress, claim_type="fact", claim_category="T6", verdict="likely_true", strength_of_support=0.9, confidence=0.9, reasoning="Reported."),
+        ClaimOut(text=denial, claim_type="fact", claim_category="T6", verdict="likely_true", strength_of_support=0.6, confidence=0.6, reasoning="Debunked."),
+        ClaimOut(text=hack, claim_type="fact", claim_category="T6", verdict="Unverified", strength_of_support=0.15, confidence=0.15, reasoning="No passage."),
+        ClaimOut(text=apocalypse, claim_type="fact", claim_category="T6", verdict="Unverified", strength_of_support=0.15, confidence=0.15, reasoning="No passage."),
+        ClaimOut(text=aging, claim_type="fact", claim_category="T6", verdict="Unverified", strength_of_support=0.15, confidence=0.15, reasoning="No passage."),
+        ClaimOut(text=assisted, claim_type="fact", claim_category="T6", verdict="Supported", strength_of_support=0.95, confidence=0.95, reasoning="Reported."),
+    ]
+    synopsis = build_synopsis(rows)
+    assert synopsis.tldr == denial
+    assert fortress not in synopsis.tldr
+    assert "Claims about" not in synopsis.summary
+    assert synopsis.summary.startswith("Partly verified. " + denial)
+    assert "3 claims could not be confirmed." in synopsis.summary
+
+
+def test_dated_event_wikipedia_query_includes_the_month_and_year(caplog):
+    import logging
+
+    from factcheck.archives import WikipediaRetriever
+    from factcheck.queries import wikipedia_event_query
+    from factcheck.retain import screen_hits
+
+    claim = "In mid-October 2026 a European supermarket refrigeration cyberattack knocked freezers offline."
+    query = wikipedia_event_query(claim)
+    assert "October" in query and "2026" in query
+    assert "supermarket" in query or "cyberattack" in query
+    assert "mid-October" not in query
+
+    class Wiki(WikipediaRetriever):
+        def search(self, query, *, limit=2):
+            self.seen = query
+            return []
+
+    wiki = Wiki("lab@example.com", client=None, min_interval=0)
+    wiki.client = None
+    caplog.set_level(logging.WARNING, logger="factcheck")
+    assert wiki.search_dated_event(claim) == []
+    assert wiki.seen == query
+    assert any("reason=no_results" in record.message and "October 2026" in record.message for record in caplog.records)
+
+    caplog.clear()
+    hits = _hits(
+        [
+            {
+                "url": "https://en.wikipedia.org/wiki/French_painting",
+                "title": "French painting",
+                "grade": "C",
+                "source_type": "secondary",
+                "text": "Nineteenth century portrait painters worked in Paris studios.",
+            }
+        ]
+    )
+    screen_hits(claim, hits, {"start_date": "2026-10-01", "end_date": "2026-10-31"})
+    assert any("wikipedia dated event dropped" in record.message and "wikipedia.org" in record.message for record in caplog.records)
 
 
 def test_low_tier_pages_are_hidden_when_a_strong_source_is_present():
@@ -327,12 +392,10 @@ def test_abbreviations_stay_inside_the_sentence_and_the_tldr():
         ),
     ]
     synopsis = build_synopsis(rows)
-    assert "U.S. commands" in synopsis.summary
-    assert not synopsis.tldr.rstrip(".").endswith("U.S")
-    assert "U.S." not in synopsis.tldr or "commands" in synopsis.tldr
-    assert synopsis.summary.lower().index("u.s.") < synopsis.summary.lower().index("claims about")
+    assert synopsis.tldr == "A Pentagon initiative ordering major U.S. commands to stock supplies was misread as a civilian hoard order."
+    assert "U.S. commands" in synopsis.tldr
     assert "could not be confirmed" in synopsis.summary
-    assert "t pointing" not in synopsis.summary
+    assert "Claims about" not in synopsis.summary
 
 
 def test_unrelated_pages_are_dropped_and_encyclopedia_quotes_are_shared():

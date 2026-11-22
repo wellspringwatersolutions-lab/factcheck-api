@@ -7,6 +7,7 @@ not already in the brief, the deterministic sentence is what the report shows.
 
 from __future__ import annotations
 
+import logging
 import re
 import time
 
@@ -14,6 +15,8 @@ from factcheck.llm import LLMError, estimate_cost, loads_object
 from factcheck.request_ctx import charge_tokens
 from factcheck.schemas import ClaimOut, SynopsisCounts, SynopsisOut
 from factcheck.textutil import split_sentences
+
+logger = logging.getLogger("factcheck")
 
 _RATINGS = (
     "Accurate",
@@ -42,16 +45,13 @@ _STOP = {
     "technically", "never", "does",
 }
 _ABSTAIN = "There wasn't enough evidence to settle this."
-_INSTRUCTION = """You phrase a veracity synopsis. You do not decide it.
-The rating is already fixed and must be the first words of summary: {rating}
-Write summary as one to three plain sentences that answer the question from the claim verdicts and cited quotes below.
-Also write tldr as one complete sentence of at most 35 words. It must lead with the confirmed denial or the strongest confirmed claim, start with a capital letter, end with a period, and must not start with "Claims about" or an unconfirmed claim.
-Do not add any person, place, date, number, or event that is not written in the brief.
-If the rating is "Not enough evidence", both summary and tldr must say there was not enough evidence, and must not sound confident.
-If the rating is "Partly verified" or "Mostly accurate", the summary's first sentence is what was confirmed. The next sentence says what could not be confirmed.
-For each unverified claim, topics is a noun phrase of at most 8 words copied from that claim. Do not treat apostrophes as quotation marks. Do not join two claims with and.
-Every sentence must be a complete sentence.
-Return JSON {{"summary": "...", "tldr": "...", "topics": ["..."]}}"""
+_INSTRUCTION = """You write the bottom line from the verdict list only. You do not decide verdicts and you do not add facts.
+The rating is already fixed. summary must start with "{rating}" and be 2 or 3 complete sentences.
+tldr is one complete sentence of at most 35 words. It leads with a claim marked Supported or likely_true, preferably a denial.
+State a fact as true only when that claim is Supported or likely_true.
+Mention an Unverified claim only to say it could not be confirmed, and never lead with it.
+Do not cut a sentence off in the middle. Use a shorter confirmed claim instead of trimming a long one.
+Return JSON {{"summary": "...", "tldr": "..."}}"""
 
 
 def _unchecked(claim: ClaimOut) -> bool:
@@ -175,15 +175,11 @@ def fallback_summary(
     supported = [claim.text for claim in facts if claim.verdict in {"Supported", "likely_true"}]
     contradicted = [claim.text for claim in facts if claim.verdict == "Contradicted"]
     unverified = [claim for claim in facts if claim.verdict in {"Unverified", "Unsupported", None}]
-    if rating == "Partly verified":
-        conclusion = _headline_text(facts)
-        missed = _unconfirmed_sentence([claim.text for claim in unverified[:2]], topics)
-        parts = [f"{rating}."]
-        if conclusion:
-            parts.append(conclusion)
-        if missed:
-            parts.append(missed)
-        return polish_prose(" ".join(parts))
+    if unverified and rating in {"Partly verified", "Mostly accurate", "Accurate"}:
+        sentence = _headline_text(facts) or _template_sentence(rating, claims)
+        count = len(unverified)
+        word = "claim" if count == 1 else "claims"
+        return polish_prose(f"{rating}. {sentence} {count} {word} could not be confirmed.")
     if rating == "Not enough evidence":
         parts = ["Not enough evidence."]
         if question:
@@ -223,15 +219,7 @@ def fallback_summary(
         if corrections:
             sentence += ". The cited evidence says: " + "; ".join(item.rstrip(".") for item in corrections)
     else:
-        headline = next(
-            (
-                claim.text
-                for claim in facts
-                if claim.verdict in {"Supported", "likely_true"}
-                and re.search(r"\b(has not told|have not told|debunk|hoard|rumou?r)\b", claim.text, re.I)
-            ),
-            "",
-        )
+        headline = _headline_text(facts)
         direct = _direct(question, main or supported[:1])
         body = [headline] if headline else (main or supported[:1])
         if direct and body:
@@ -247,9 +235,9 @@ def fallback_summary(
     sentence = sentence.strip().rstrip(".") + "."
     notes = []
     if unverified and rating != "Not enough evidence":
-        missed = _unconfirmed_sentence([claim.text for claim in unverified[:2]], topics)
-        if missed:
-            notes.append(missed)
+        count = len(unverified)
+        word = "claim" if count == 1 else "claims"
+        notes.append(f"{count} {word} could not be confirmed.")
     if unchecked_count:
         word = "claim" if unchecked_count == 1 else "claims"
         verb = "was" if unchecked_count == 1 else "were"
@@ -273,14 +261,11 @@ def _cited_corrections(claims: list[ClaimOut]) -> list[str]:
 
 
 def _brief(rating: str, question: str | None, claims: list[ClaimOut]) -> str:
+    """Verdict list only. Quotes are not given to the phrasing model."""
+    del question
     lines = [f"Rating: {rating}"]
-    if question:
-        lines.append(f"Question: {question}")
-    for claim in claims:
-        lines.append(f"Claim ({claim.verdict}, strength {claim.strength_of_support:.2f}): {claim.text}")
-        for source in claim.sources:
-            if source.quote:
-                lines.append(f"Cited quote: {source.quote}")
+    for claim in _checked_facts(claims):
+        lines.append(f"{claim.verdict}: {claim.text}")
     return "\n".join(lines)
 
 
@@ -363,7 +348,7 @@ def polish_prose(text: str) -> str:
 
 
 _DOUBLE_QUOTE = re.compile(r'["“]([^"”]{1,80})["”]')
-_DENIAL = re.compile(r"\b(not|never|no|n't|misread|rumou?r|false|debunk|has not|have not|did not)\b", re.I)
+_DENIAL = re.compile(r"\b(never|not|no|did not|n't)\b", re.I)
 _VERDICT_RANK = {"Supported": 0, "likely_true": 1}
 
 
@@ -416,15 +401,35 @@ def _unconfirmed_sentence(texts: list[str], topics: list[str] | None = None) -> 
     return " ".join(sentences)
 
 
+def _as_sentence(text: str) -> str:
+    sentence = " ".join((text or "").split()).strip()
+    if sentence and sentence[-1] not in ".!?":
+        sentence += "."
+    return sentence
+
+
 def _headline_text(claims: list[ClaimOut] | None, limit: int = 35) -> str:
-    """The debunk or denial, otherwise the strongest confirmed claim, in 35 words or fewer."""
+    """Full text of a denial, otherwise the strongest confirmed claim. Never trimmed.
+
+    A claim longer than `limit` words is skipped in favor of another confirmed claim.
+    If every confirmed claim is longer, the preferred one is kept whole.
+    """
     facts = [claim for claim in _checked_facts(claims or []) if claim.verdict in {"Supported", "likely_true"}]
-    if not facts:
-        return ""
     denials = [claim for claim in facts if _DENIAL.search(claim.text or "")]
-    pool = denials or facts
-    pool.sort(key=lambda claim: (_VERDICT_RANK.get(claim.verdict or "", 9), -_weight(claim)))
-    return _trim_sentence(pool[0].text, limit)
+    others = [claim for claim in facts if claim not in denials]
+    denials.sort(key=_weight, reverse=True)
+    others.sort(key=_weight, reverse=True)
+    ordered = denials + others
+    fallback = ""
+    for claim in ordered:
+        sentence = _as_sentence(claim.text)
+        if not complete_sentence(sentence):
+            continue
+        if not fallback:
+            fallback = sentence
+        if len(sentence.split()) <= limit:
+            return sentence
+    return fallback
 
 
 def _trim_sentence(text: str, limit: int = 35) -> str:
@@ -488,6 +493,53 @@ def grounded(summary: str, corpus: str) -> bool:
 def _says_not_enough(text: str) -> bool:
     lowered = (text or "").lower()
     return "not enough evidence" in lowered or "enough evidence to settle" in lowered or "wasn't enough evidence" in lowered
+
+
+def _phrasing_ok(summary: str, tldr: str, rating: str, claims: list[ClaimOut] | None) -> bool:
+    """Accept a model bottom line only when it is whole sentences drawn from the verdicts."""
+    tldr = (tldr or "").strip()
+    summary = (summary or "").strip()
+    claims = claims or []
+    if not complete_sentence(tldr) or len(tldr.split()) > 35:
+        return False
+    if tldr.lower().startswith("claims about"):
+        return False
+    if not summary.lower().startswith((rating or "").lower()):
+        return False
+    sentences = split_sentences(summary)
+    if not 2 <= len(sentences) <= 3:
+        return False
+    if not all(sentence.rstrip(".").lower() == (rating or "").lower() or complete_sentence(sentence) for sentence in sentences):
+        return False
+    confirmed = set()
+    unverified_only = set()
+    confirmed_text = []
+    for claim in _checked_facts(claims):
+        words = _claim_words(claim.text)
+        if claim.verdict in {"Supported", "likely_true"}:
+            confirmed |= words
+            confirmed_text.append(claim.text or "")
+        elif claim.verdict in {"Unverified", "Unsupported", None}:
+            unverified_only |= words
+    unverified_only -= confirmed
+    tldr_words = _claim_words(tldr)
+    if confirmed and not (tldr_words & confirmed):
+        return False
+    if tldr_words & unverified_only:
+        return False
+    for number in _NUMBER.findall(tldr):
+        if number not in " ".join(confirmed_text):
+            return False
+    content = sentences[1:] if sentences[0].rstrip(".").lower() == (rating or "").lower() else sentences
+    if confirmed and content and not (_claim_words(content[0]) & confirmed):
+        return False
+    if content and re.search(r"could not be confirmed|unconfirmed", content[0], re.I):
+        return False
+    for sentence in sentences:
+        leaked = _claim_words(sentence) & unverified_only
+        if leaked and not re.search(r"could not be confirmed|unconfirmed|not confirmed", sentence, re.I):
+            return False
+    return True
 
 
 def _accept_tldr(text: str, corpus: str, rating: str, claims: list[ClaimOut] | None = None) -> bool:
@@ -561,21 +613,22 @@ def build_synopsis(
     if phrasing is not None and not contradicted and (remaining is None or remaining >= 3.5):
         brief = _brief(rating, question, claims)
         try:
-            phrased = phrasing(brief, rating)
+            phrased = phrasing(brief, rating, claims)
+        except TypeError:
+            try:
+                phrased = phrasing(brief, rating)
+            except Exception:  # noqa: BLE001 - a failed phrasing call must not fail the report
+                phrased = None
         except Exception:  # noqa: BLE001 - a failed phrasing call must not fail the report
             phrased = None
-    else:
-        brief = ""
-    topics = _usable_topics(phrased, claims)
-    summary = fallback_summary(rating, question, claims, caveats, unchecked_count, topics)
+    summary_text, tldr_text = _phrased_parts(phrased)
+    if not _phrasing_ok(summary_text or "", tldr_text or "", rating, claims):
+        summary_text, tldr_text = None, None
+    summary = fallback_summary(rating, question, claims, caveats, unchecked_count)
     tldr = fallback_tldr(rating, summary, claims)
-    if phrased is not None:
-        summary_text, tldr_text = _phrased_parts(phrased)
-        if summary_text and grounded(summary_text, brief) and _summary_leads(summary_text, rating, claims):
-            cleaned = summary_text.strip()
-            summary = cleaned if cleaned.lower().startswith(rating.lower()) else f"{rating}. {cleaned}"
-        if tldr_text and _accept_tldr(tldr_text, brief, rating, claims):
-            tldr = tldr_text.strip()
+    if summary_text and tldr_text:
+        summary = summary_text.strip()
+        tldr = tldr_text.strip()
     from factcheck.reconcile import answer_for_rating
 
     supported_texts = [claim.text for claim in claims if claim.verdict == "Supported"]
@@ -621,36 +674,54 @@ def _phrased_parts(phrased) -> tuple[str | None, str | None]:
 
 
 class LLMSynopsis:
-    """One short phrasing call. Returns None on any failure so the caller keeps the fallback."""
+    """Chutes writes the bottom line. A failed check retries once on the other model."""
 
     def __init__(self, client, model: str, meter, settings):
         self.client = client
         self.model = model
         self.meter = meter
         self.settings = settings
+        primary = getattr(settings, "judge_b_model", None) or model
+        secondary = getattr(settings, "judge_a_model", None) or model
+        self.models = []
+        for name in (primary, secondary):
+            if name and name not in self.models:
+                self.models.append(name)
 
-    def __call__(self, brief: str, rating: str) -> dict | None:
+    def __call__(self, brief: str, rating: str, claims: list[ClaimOut] | None = None) -> dict | None:
+        for model in self.models:
+            payload = self._once(model, brief, rating)
+            if payload is None:
+                logger.warning("synopsis model=%s failed", model)
+                continue
+            if _phrasing_ok(payload["summary"], payload["tldr"], rating, claims):
+                logger.warning("synopsis model=%s", model)
+                return payload
+            logger.warning("synopsis model=%s rejected", model)
+        return None
+
+    def _once(self, model: str, brief: str, rating: str) -> dict | None:
         try:
             result = self.client.complete(
-                model=self.model,
+                model=model,
                 messages=[
                     {"role": "system", "content": _INSTRUCTION.format(rating=rating)},
                     {"role": "user", "content": brief},
                 ],
                 temperature=0.0,
-                max_tokens=220,
+                max_tokens=280,
                 timeout=3.0,
             )
         except (LLMError, Exception):  # noqa: BLE001
             return None
         charge_tokens(
             self.meter,
-                model=result.model,
-                provider=result.provider,
-                input_tokens=result.input_tokens,
-                output_tokens=result.output_tokens,
-                cost=estimate_cost(self.settings, result.model, result.input_tokens, result.output_tokens),
-            )
+            model=result.model,
+            provider=result.provider,
+            input_tokens=result.input_tokens,
+            output_tokens=result.output_tokens,
+            cost=estimate_cost(self.settings, result.model, result.input_tokens, result.output_tokens),
+        )
         try:
             payload = loads_object(result)
         except (LLMError, ValueError, TypeError):
@@ -659,20 +730,6 @@ class LLMSynopsis:
             return None
         summary = payload.get("summary")
         tldr = payload.get("tldr")
-        if not isinstance(summary, str) or not summary.strip():
+        if not isinstance(summary, str) or not isinstance(tldr, str):
             return None
-        body = summary.strip()
-        if body.lower().startswith(rating.lower()):
-            body = body[len(rating):].lstrip(" .")
-        if not complete_sentence(body):
-            return None
-        if isinstance(tldr, str) and tldr.strip() and not complete_sentence(tldr.strip()):
-            tldr = ""
-        payload_out = {
-            "summary": summary.strip(),
-            "tldr": tldr.strip() if isinstance(tldr, str) else "",
-        }
-        topics = payload.get("topics")
-        if isinstance(topics, list):
-            payload_out["topics"] = [item.strip() for item in topics if isinstance(item, str) and item.strip()]
-        return payload_out
+        return {"summary": summary.strip(), "tldr": tldr.strip()}

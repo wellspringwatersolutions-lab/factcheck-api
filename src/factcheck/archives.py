@@ -7,9 +7,12 @@ Smithsonian, DPLA, and Europeana are skipped when their keys are blank.
 
 from __future__ import annotations
 
+import logging
 import re
 
 import httpx
+
+logger = logging.getLogger("factcheck")
 
 from factcheck.references import user_agent
 from factcheck.scholarly import RateLimiter
@@ -105,6 +108,33 @@ class WikipediaRetriever:
                 )
             )
         return hits[:limit]
+
+    def search_dated_event(self, claim: str) -> list[Evidence]:
+        """Always search Wikipedia for a dated event's nouns plus its month and year."""
+        from factcheck.queries import wikipedia_event_query
+
+        query = wikipedia_event_query(claim)
+        if not query:
+            return []
+        try:
+            hits = self.search(query, limit=2)
+        except Exception as exc:  # noqa: BLE001 - a reference miss must not fail the check
+            logger.warning(
+                "wikipedia dated event dropped claim=%r query=%s reason=%s",
+                (claim or "")[:160],
+                query,
+                exc.__class__.__name__,
+            )
+            return []
+        if not hits:
+            logger.warning(
+                "wikipedia dated event dropped claim=%r query=%s reason=no_results",
+                (claim or "")[:160],
+                query,
+            )
+            return []
+        logger.warning("wikipedia dated event claim=%r query=%s returned=%d", (claim or "")[:160], query, len(hits))
+        return hits
 
 
 class CrossrefRetriever:
