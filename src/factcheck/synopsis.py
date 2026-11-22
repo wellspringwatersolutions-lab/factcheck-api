@@ -49,7 +49,8 @@ _INSTRUCTION = """You write the bottom line from the verdict list only. You do n
 The rating is already fixed. summary must start with "{rating}" and be 2 to 4 complete sentences.
 tldr is one complete sentence of at most 35 words. It leads with a claim marked Supported or likely_true, preferably a denial.
 The sentence after the tldr may state up to two other Supported or likely_true claims, in full, as true.
-State a fact as true only when that claim is Supported or likely_true.
+State a Supported claim as true. A likely_true or Hypothesis claim is only probably true: phrase it as "Reputable sources report ...", not as a confirmed fact.
+A Contradicted claim is disputed: say the sources contradict or dispute it. Do not state it as true.
 Mention an Unverified claim only to say it could not be confirmed, and never lead with it.
 Do not cut a sentence off in the middle. Use a shorter confirmed claim instead of trimming a long one.
 Return JSON {{"summary": "...", "tldr": "..."}}"""
@@ -549,24 +550,37 @@ def _phrasing_ok(summary: str, tldr: str, rating: str, claims: list[ClaimOut] | 
         return False
     if not all(_summary_sentence_ok(sentence, rating) for sentence in sentences):
         return False
-    confirmed = set()
+    settled = set()
+    probable = set()
+    disputed = set()
     unverified_only = set()
-    confirmed_text = []
+    allowed_text = []
     for claim in _checked_facts(claims):
-        words = _claim_words(claim.text)
-        if claim.verdict in {"Supported", "likely_true"}:
-            confirmed |= words
-            confirmed_text.append(claim.text or "")
+        words = _marks(claim.text)
+        if claim.verdict == "Supported":
+            settled |= words
+            allowed_text.append(claim.text or "")
+        elif claim.verdict in {"likely_true", "Hypothesis"}:
+            probable |= words
+            allowed_text.append(claim.text or "")
+        elif claim.verdict == "Contradicted":
+            disputed |= words
+            allowed_text.append(claim.text or "")
         elif claim.verdict in {"Unverified", "Unsupported", None}:
             unverified_only |= words
+    confirmed = settled | probable
     unverified_only -= confirmed
+    probable -= settled
+    disputed -= confirmed
     tldr_words = _claim_words(tldr)
     if confirmed and not (tldr_words & confirmed):
         return False
     if tldr_words & unverified_only:
         return False
+    if not _voice_ok(tldr, probable, disputed):
+        return False
     for number in _NUMBER.findall(tldr):
-        if number not in " ".join(confirmed_text):
+        if number not in " ".join(allowed_text):
             return False
     content = sentences[1:] if sentences[0].rstrip(".").lower() == (rating or "").lower() else sentences
     if confirmed and content and not (_claim_words(content[0]) & confirmed):
@@ -577,6 +591,23 @@ def _phrasing_ok(summary: str, tldr: str, rating: str, claims: list[ClaimOut] | 
         leaked = _claim_words(sentence) & unverified_only
         if leaked and not re.search(r"could not be confirmed|unconfirmed|not confirmed", sentence, re.I):
             return False
+        if not _voice_ok(sentence, probable, disputed):
+            return False
+    return True
+
+
+def _marks(text: str) -> set[str]:
+    """Words and numbers distinctive enough to show which claim a sentence is using."""
+    return {word for word in _claim_words(text) if len(word) >= 5} | set(_NUMBER.findall(text or ""))
+
+
+def _voice_ok(sentence: str, probable: set[str], disputed: set[str]) -> bool:
+    """likely_true is probably true. A contradicted claim stays disputed after it is renamed conflicting."""
+    words = _marks(sentence)
+    if words & probable and "reputable sources report" not in (sentence or "").lower():
+        return False
+    if words & disputed and not re.search(r"contradict|disput", sentence or "", re.I):
+        return False
     return True
 
 

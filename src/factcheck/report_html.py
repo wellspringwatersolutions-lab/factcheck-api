@@ -53,9 +53,12 @@ _PAGE = """<!DOCTYPE html>
 
 
 def _article(claim) -> str:
-    if claim.verdict == "Hypothesis":
+    from factcheck.publish import map_verdict
+
+    public, detail, label = map_verdict(claim.verdict, claim.claim_type, claim.verdict_detail)
+    if public == "hypothesis":
         kind = "claim-hypothesis"
-    elif claim.claim_type == "opinion" or claim.mainstream_check:
+    elif public == "opinion" or claim.mainstream_check:
         kind = "claim-opinion"
     else:
         kind = "claim-fact"
@@ -73,7 +76,6 @@ def _article(claim) -> str:
                 f"{html.escape(item.rating)}{when}</p>"
             )
     else:
-        label = "Likely true" if claim.verdict == "likely_true" else (claim.verdict or "No verdict")
         bits.append(f"<p><strong>{html.escape(label)}</strong> · strength of support {claim.strength_of_support:.2f}</p>")
         if claim.hypothesis_status:
             bits.append(f"<p>Hypothesis status: {html.escape(claim.hypothesis_status.replace('_', ' '))}</p>")

@@ -136,7 +136,9 @@ def build_mcp(service) -> MCPServer:
         found = await anyio.to_thread.run_sync(service.get, verification_id)
         if found is None:
             raise ToolError(json.dumps({"error": {"code": "not_found", "message": "No verification with that id."}}))
-        return json.dumps(found.model_dump(mode="json"), ensure_ascii=False)
+        from factcheck.publish import publish_verification
+
+        return json.dumps(publish_verification(found), ensure_ascii=False)
 
     for tool in mcp._tool_manager.list_tools():
         _tighten(tool.parameters)
@@ -155,4 +157,6 @@ async def _verify(service, *, text, claims) -> str:
         raise ToolError(json.dumps(exc.body())) from exc
     except DraftError as exc:
         raise ToolError(json.dumps(exc.body())) from exc
-    return json.dumps(result.model_dump(mode="json"), ensure_ascii=False)
+    from factcheck.publish import publish_verification
+
+    return json.dumps(publish_verification(result), ensure_ascii=False)

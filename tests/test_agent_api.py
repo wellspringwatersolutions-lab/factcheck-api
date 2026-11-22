@@ -19,14 +19,20 @@ def test_constitution_is_markdown_and_json_and_linked():
         markdown = client.get("/constitution")
         assert markdown.status_code == 200
         assert "text/markdown" in markdown.headers["content-type"]
-        assert "likely_true" in markdown.text
-        assert "Contradicted" in markdown.text
+        assert "supported, hypothesis, opinion, conflicting, and unverified" in markdown.text
+        assert "verdict_detail" in markdown.text
         document = client.get("/constitution", headers={"Accept": "application/json"})
         assert document.status_code == 200
         body = document.json()
         assert body["version"]
         assert body["markdown"].startswith("# Factcheck constitution")
-        assert any(item["verdict"] == "likely_true" for item in body["verdicts"])
+        assert [item["verdict"] for item in body["verdicts"]] == [
+            "supported",
+            "hypothesis",
+            "opinion",
+            "conflicting",
+            "unverified",
+        ]
         llms = client.get("/llms.txt").text
         assert "/constitution" in llms
         assert "claims[].text" in llms or "`text`" in llms

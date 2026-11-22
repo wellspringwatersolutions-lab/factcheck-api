@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from factcheck.branding import SERVICE_NAME
 
+# Internal states, plus the five public names so a stored public payload still loads.
 Verdict = Literal[
     "Supported",
     "likely_true",
@@ -16,7 +17,14 @@ Verdict = Literal[
     "Conflicting",
     "Unsupported",
     "Hypothesis",
+    "supported",
+    "hypothesis",
+    "opinion",
+    "conflicting",
+    "unverified",
 ]
+PublicVerdict = Literal["supported", "hypothesis", "opinion", "conflicting", "unverified"]
+VerdictDetail = Literal["likely_true", "speculative", "contradicted"]
 Consensus = Literal["mostly_agrees", "disputed", "mixed", "no_coverage"]
 HypothesisStatus = Literal["supporting_evidence", "contradicting_evidence", "untested"]
 
@@ -87,6 +95,8 @@ class ClaimOut(BaseModel):
     category_label: str = ""
     effort: str = ""
     verdict: Verdict | None = None
+    verdict_label: str = ""
+    verdict_detail: VerdictDetail | None = None
     strength_of_support: float = 0.0
     confidence: float = 0.0
     reasoning: str
@@ -212,6 +222,18 @@ class ErrorResponse(BaseModel):
     request_id: str = ""
 
 
+class PublicClaimOut(ClaimOut):
+    """A claim as a client sees it. verdict is only one of the five public names."""
+
+    verdict: PublicVerdict | None = None
+
+
+class PublicVerificationOut(VerificationOut):
+    """POST /v1/verify body. claims[].text is the wording. claims[].verdict is public."""
+
+    claims: list[PublicClaimOut]
+
+
 class CheckSourceOut(BaseModel):
     """One source on POST /check. The claim text itself is the sibling field `claim`, not `text`."""
 
@@ -228,8 +250,9 @@ class CheckClaimOut(BaseModel):
     claim: str
     claim_type: str
     claim_category: str
-    verdict: str
+    verdict: PublicVerdict
     verdict_label: str = ""
+    verdict_detail: VerdictDetail | None = None
     span: str = ""
     strength_of_support: float = 0.0
     checked_at: str = ""

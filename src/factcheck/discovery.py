@@ -15,6 +15,8 @@ def llms_txt(base_url: str) -> str:
 
 It extracts atomic claims, recomputes math, retrieves evidence for factual claims, and reports what mainstream fact-checkers say about opinions. A supported verdict is shown only when a retrieved passage or a tool result backs the claim, and the report quotes that passage. Language models rank evidence. They do not decide the verdict.
 
+Public claim verdicts are lowercase and only these five, in this order: supported, hypothesis, opinion, conflicting, unverified. `verdict_label` is the display name, such as Hypothesis. `verdict_detail` is `likely_true` (one good source; still counts toward the rating), `speculative`, or `contradicted` (a conflicting claim the sources go against). Older names such as Supported, likely_true, and Contradicted are accepted on input and mapped to these five on output.
+
 {DISCLAIMER}
 
 The rules are published at {root}/constitution (markdown, or JSON with `Accept: application/json`).

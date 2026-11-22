@@ -51,7 +51,10 @@ def test_http_free_tier_report_and_discovery():
         )
         assert response.status_code == 200, response.text
         body = response.json()
-        assert body["claims"][0]["verdict"] == "Supported"
+        assert body["claims"][0]["verdict"] == "supported"
+        assert body["claims"][0]["verdict_label"] == "Supported"
+        assert body["claims"][0]["verdict_detail"] is None
+        assert body["claims"][1]["verdict"] == "opinion"
         assert body["claims"][1]["mainstream_check"]["label"] == "What mainstream fact-checkers say"
         assert "upgrade_url" in body
         report = client.get(f"/v1/verification/{body['verification_id']}/report")

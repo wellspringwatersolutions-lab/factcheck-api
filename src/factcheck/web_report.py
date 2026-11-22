@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from factcheck.publish import map_verdict
 from factcheck.schemas import VerificationOut
 from factcheck.textutil import hostname
 
@@ -54,9 +55,7 @@ def _source_type(raw: str, url: str) -> str:
 def to_check_report(result: VerificationOut, input_text: str) -> dict:
     claims = []
     for claim in result.claims:
-        verdict = (claim.verdict or "unverified").lower()
-        if verdict == "unsupported":
-            verdict = "unverified"
+        verdict, detail, label = map_verdict(claim.verdict, claim.claim_type, claim.verdict_detail)
         sources = []
         for source in claim.sources:
             quote = source.quote or source.snippet
@@ -107,7 +106,8 @@ def to_check_report(result: VerificationOut, input_text: str) -> dict:
             "claim_type": claim.claim_type,
             "claim_category": category,
             "verdict": verdict,
-            "verdict_label": "Likely true" if verdict == "likely_true" else verdict.replace("_", " ").title(),
+            "verdict_label": label,
+            "verdict_detail": detail,
             "span": claim.span,
             "strength_of_support": claim.strength_of_support,
             "checked_at": claim.checked_at,

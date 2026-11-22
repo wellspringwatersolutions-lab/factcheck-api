@@ -31,14 +31,17 @@ The product name lives in `src/factcheck/branding.py` as `SERVICE_NAME`.
 
 Verdicts:
 
+The public verdict on `/check`, `/v1/verify`, job reports, MCP tools, and stored verifications is lowercase and only one of these, in order:
+
 | Verdict | When |
 | --- | --- |
-| Supported | A tool result, a structured fact of record such as a Wikidata office or date, or two independent sources from the upper part of the evidence scale quote the claim. |
-| likely_true | Site label "Likely true". One reputable source (major news, government, or an encyclopedia) backs the substance, or the quote is not exact enough for Supported. It counts toward the bottom line. |
-| Contradicted | The best quoted evidence goes against the claim as written. The site may display this as Conflicting. The API value stays `Contradicted`. |
-| Unverified | No usable passage, or only a weak source. This means the claim could not be confirmed. It does not mean the claim is false. |
-| Conflicting | Credible sources disagree. Both quotes are shown. |
-| Hypothesis | A prediction, novel conjecture, or business idea. Status is `supporting_evidence`, `contradicting_evidence`, or `untested`. Never true or false. |
+| supported | A tool result, a structured fact of record, two independent upper-scale sources, or two explicit debunks quote the claim. |
+| hypothesis | One good source makes it probably true (`verdict_detail` `likely_true`), or the claim is speculative (`verdict_detail` `speculative`). `verdict_label` is Hypothesis. A `likely_true` claim still counts toward Partly verified and Mostly accurate. |
+| opinion | Not true or false. The report says what mainstream fact-checkers wrote. |
+| conflicting | Sources disagree, or a quote goes against the claim (`verdict_detail` `contradicted`). The rating still treats a contradicted claim as against the claim. |
+| unverified | No usable passage. The claim was not confirmed, and it was not shown to be false. |
+
+Older names (`Supported`, `likely_true`, `Contradicted`, `Unsupported`, `Hypothesis`) are accepted on input and mapped to these five on output.
 
 Categories change how strict the check is:
 
@@ -50,7 +53,7 @@ Categories change how strict the check is:
 - **T7** Eyewitness accounts. Low weight.
 - **T8** Opinions and anecdotes. These go to the mainstream fact-checker lane (Google Fact Check Tools, then Snopes, PolitiFact, FactCheck.org, AP Fact Check, and Reuters Fact Check).
 
-A Supported label needs a tool result, a structured fact of record such as a Wikidata date, or two independent sources from the upper part of the evidence scale (studies, the historical record, or an official source). One secondary page, an anecdote, or an eyewitness account stays Unverified. The API value stays `Contradicted` when the best evidence goes against the claim. Conflicting means credible sources disagree. There is no numeric score for the whole answer.
+A supported label needs a tool result, a structured fact of record such as a Wikidata date, or two independent sources from the upper part of the evidence scale (studies, the historical record, or an official source). One secondary page, an anecdote, or an eyewitness account stays unverified. One good source is hypothesis with `verdict_detail` `likely_true`. A quote that goes against the claim is conflicting with `verdict_detail` `contradicted`. There is no numeric score for the whole answer.
 
 Wikipedia, Britannica, and the other established encyclopedias are graded B, as a tertiary reference. One of them is enough for a fact of record (an office, a date, a role, or a well-documented event), and every Wikipedia page counts as the same source. A claim that someone was not a criminal is supported when those sources describe the person in non-criminal terms and no conviction or charge is in the record. Wikidata is retried once; if it is down, the Wikipedia lead sentence is used instead. Archive.org, GDELT, and Chronicling America are skipped for those well-documented facts so the check stays inside the time budget. OpenAlex sends a mailto. Semantic Scholar works without a key and backs off once on HTTP 429.
 

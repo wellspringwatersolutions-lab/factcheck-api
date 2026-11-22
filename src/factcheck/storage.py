@@ -12,6 +12,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 from sqlalchemy.pool import StaticPool
 from sqlalchemy.types import JSON
 
+from factcheck.publish import publish_verification
 from factcheck.schemas import VerificationOut
 
 
@@ -127,7 +128,7 @@ class Store:
                 VerificationRow(
                     id=payload.verification_id,
                     created_at=datetime.fromisoformat(payload.created_at),
-                    payload=payload.model_dump(mode="json"),
+                    payload=publish_verification(payload),
                     fingerprint=fingerprint,
                     tier=tier,
                     api_key_id=api_key_id,

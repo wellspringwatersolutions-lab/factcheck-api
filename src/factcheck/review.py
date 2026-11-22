@@ -114,7 +114,9 @@ def apply_corrections(result: VerificationOut, proposed: dict) -> list[ReviewCha
     changes: list[ReviewChange] = []
     for item in proposed.get("corrections") or []:
         claim = _find_claim(result, str(item.get("claim") or ""))
-        target = str(item.get("to") or "")
+        from factcheck.publish import canonical_verdict
+
+        target = canonical_verdict(str(item.get("to") or "")) or ""
         quote = str(item.get("quote") or "").strip()
         reason = str(item.get("reason") or "").strip()[:300]
         if claim is None or claim.claim_type == "opinion" or claim.verdict == "Hypothesis":

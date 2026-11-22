@@ -25,13 +25,14 @@ from factcheck.discovery import llms_txt, manifest
 from factcheck.jobs import enqueue_check
 from factcheck.mcp_server import build_mcp, current_identity, reset_identity, set_identity
 from factcheck.payments import StripeCreditPacks, TaoDeposits
+from factcheck.publish import publish_verification
 from factcheck.report_html import render_home, render_report
 from factcheck.schemas import (
     CheckReportOut,
     ErrorResponse,
     JobAccepted,
     JobStatusOut,
-    VerificationOut,
+    PublicVerificationOut,
     VerifyIn,
 )
 from factcheck.web_report import to_check_report
@@ -297,8 +298,7 @@ def create_app(settings: Settings | None = None, service=None) -> FastAPI:
 
     @app.post(
         "/v1/verify",
-        response_model=VerificationOut,
-        responses=_ERROR_RESPONSES,
+        responses={200: {"model": PublicVerificationOut, "description": "Verification. claims[].verdict is supported, hypothesis, opinion, conflicting, or unverified, in that order."}, **_ERROR_RESPONSES},
         summary="Check text or claims. Each claim uses the field text.",
     )
     async def verify(body: VerifyIn, request: Request):
@@ -306,7 +306,7 @@ def create_app(settings: Settings | None = None, service=None) -> FastAPI:
         result = await _execute(body, request)
         if isinstance(result, JSONResponse):
             return result
-        return _stamp(request, result.model_dump(mode="json", by_alias=True))
+        return _stamp(request, publish_verification(result))
 
     def _wants_async(body: VerifyIn, request: Request) -> bool:
         prefer = (request.headers.get("prefer") or "").lower()
@@ -358,12 +358,12 @@ def create_app(settings: Settings | None = None, service=None) -> FastAPI:
             return _error(request, 404, "not_found", "No job with that id.")
         return _stamp(request, found)
 
-    @app.get("/v1/verification/{verification_id}", response_model=VerificationOut, responses={404: {"model": ErrorResponse}})
+    @app.get("/v1/verification/{verification_id}", response_model=PublicVerificationOut, responses={404: {"model": ErrorResponse}})
     def get_verification(verification_id: str, request: Request):
         found = service.get(verification_id)
         if found is None:
             return _error(request, 404, "not_found", "No verification with that id.")
-        return _stamp(request, found.model_dump(mode="json", by_alias=True))
+        return _stamp(request, publish_verification(found))
 
     @app.get("/v1/verification/{verification_id}/report", response_class=HTMLResponse)
     def report(verification_id: str):
