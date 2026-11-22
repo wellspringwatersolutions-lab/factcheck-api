@@ -67,14 +67,27 @@ def offline_label(claim: str, page: str) -> tuple[str, str]:
     return "not_relevant", ""
 
 
-def apply_verified_labels(passages: list[Evidence], votes: list[JudgeVote]) -> list[Evidence]:
+def apply_verified_labels(passages: list[Evidence], votes: list[JudgeVote], claim: str = "") -> list[Evidence]:
     """Keep a SUPPORTS or REFUTES label only when its quote is in the cleaned passage."""
+    from factcheck.checks import factchecker_relation, is_debunk
+
     for passage in passages:
-        if passage.provider == "google_factcheck" or passage.source_type == "fact_checker":
+        page = passage.page_text or passage.snippet or passage.quote or ""
+        if passage.provider == "google_factcheck" or passage.source_type == "fact_checker" or is_debunk(page, passage.url):
             passage.source_type = "fact_checker"
-            passage.entailment = "neutral"
-            passage.used = False
-            passage.quote = passage.quote or (passage.snippet or "")[:400]
+            relation = factchecker_relation(claim, page) if claim else None
+            if relation == "entails":
+                passage.entailment = "entails"
+                passage.used = True
+                passage.quote = passage.quote or page[:400]
+            elif relation == "contradicts":
+                passage.entailment = "contradicts"
+                passage.used = True
+                passage.quote = passage.quote or page[:400]
+            else:
+                passage.entailment = "neutral"
+                passage.used = False
+                passage.quote = passage.quote or page[:400]
             continue
         if (
             passage.used

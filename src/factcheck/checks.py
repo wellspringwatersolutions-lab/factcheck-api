@@ -134,10 +134,56 @@ def rumor_mention(text: str) -> bool:
     return not is_debunk(text)
 
 
+def _clearly_backs(claim: str, passage: str) -> bool:
+    """Topic overlap is not enough. The passage has to carry the claim's distinctive words."""
+    if overlap(claim, passage) < 0.5:
+        return False
+    from factcheck.textutil import tokens
+
+    distinctive = {word for word in tokens(claim) if len(word) >= 6}
+    if not distinctive:
+        return True
+    return len(distinctive & tokens(passage)) / len(distinctive) >= 0.5
+
+
+_RUMOR_ASSERTION = re.compile(
+    r"\b(told|ordered|asked|instructed|urged)\b.+\b(hoard|stockpile)\b|\b(hoard|stockpile)\b.+\b(food|days)\b",
+    re.I,
+)
+
+
+def factchecker_relation(claim: str, passage: str) -> str | None:
+    """A fact-check can debunk a rumor and still support the origin of that rumor.
+
+    A denial of the rumor is supported. The rumor itself is contradicted.
+    A claim that only explains where the rumor came from is supported when a
+    sentence in the page states that origin.
+    """
+    if not is_debunk(passage):
+        return None
+    if is_denial(claim) and overlap(claim, passage) >= 0.2:
+        return "entails"
+    from factcheck.textutil import split_sentences
+
+    for sentence in split_sentences(passage) or [passage]:
+        if overlap(claim, sentence) < 0.45:
+            continue
+        if is_debunk(sentence) and has_negation(claim) != has_negation(sentence):
+            continue
+        if has_negation(claim) == has_negation(sentence) and _clearly_backs(claim, sentence):
+            return "entails"
+    if not is_denial(claim) and _RUMOR_ASSERTION.search(claim or "") and overlap(claim, passage) >= 0.25:
+        return "contradicts"
+    return "neutral"
+
+
 def entailment(claim: str, passage: str) -> str:
     """Offline sentence check. A debunk supports a claim that denies the rumor."""
     if not passage or not passage.strip():
         return "neutral"
+    checked = factchecker_relation(claim, passage)
+    if checked is not None:
+        return checked
     if "<" in passage and ">" in passage:
         passage = clean_html(passage)
     raw_claim = claim
@@ -157,9 +203,9 @@ def entailment(claim: str, passage: str) -> str:
         return "entails"
     claim_neg = has_negation(claim)
     passage_neg = has_negation(passage)
-    if recall >= 0.45 and claim_neg == passage_neg:
+    if claim_neg == passage_neg and _clearly_backs(claim, passage):
         return "entails"
-    if recall >= 0.45 and claim_neg != passage_neg:
+    if recall >= 0.55 and claim_neg != passage_neg and _clearly_backs(claim, passage):
         return "contradicts"
     return "neutral"
 

@@ -241,10 +241,87 @@ def test_long_paste_rating_names_what_was_confirmed():
     ]
     synopsis = build_synopsis(rows)
     assert synopsis.rating in {"Mostly accurate", "Partly verified"}
-    assert synopsis.tldr == "The U.S. government has not told civilians to hoard 90 days of food."
+    assert synopsis.tldr == "Reputable sources report that the U.S. government has not told civilians to hoard 90 days of food."
     assert "could not be confirmed" in synopsis.summary
     assert "Claims about" not in synopsis.summary
     assert synopsis.rating != "Not enough evidence"
+
+
+def test_a_supportive_snopes_page_keeps_the_fortress_origin_likely_true():
+    from factcheck.aggregate import decide
+    from factcheck.checks import apply_debunk_labels, entailment
+    from factcheck.judge import apply_verified_labels
+    from factcheck.publish import map_verdict
+    from factcheck.types import Evidence, JudgeVote
+
+    claim = (
+        "That rumor blew up on TikTok and Facebook after Pete Hegseth announced FORTRESS America, "
+        "a Pentagon initiative ordering major U.S. military bases to operate off-grid for 90 days."
+    )
+    page = (
+        "Snopes rating: False. The U.S. government has not told civilians to hoard 90 days of food. "
+        "The posts misread FORTRESS America, a Pentagon initiative ordering major U.S. military bases to operate off-grid for 90 days."
+    )
+    evidence = Evidence(
+        url="https://www.snopes.com/fact-check/fortress-food",
+        title="Snopes",
+        snippet=page,
+        quote=page,
+        page_text=page,
+        grade="B",
+        source_type="fact_checker",
+        origin_id="snopes.com",
+        entailment=entailment(claim, page),
+        used=True,
+    )
+    labeled = apply_verified_labels(
+        [evidence],
+        [
+            JudgeVote(role="a", model="qwen", provider="chutes", family="qwen", verdict="rank_only", reasoning="", stances={evidence.url: "contradicts"}, quotes={evidence.url: "The U.S. government has not told civilians to hoard 90 days of food."}),
+            JudgeVote(role="b", model="deepseek", provider="chutes", family="deepseek", verdict="rank_only", reasoning="", stances={evidence.url: "supports"}, quotes={evidence.url: "FORTRESS America, a Pentagon initiative ordering major U.S. military bases to operate off-grid for 90 days."}),
+        ],
+        claim,
+    )
+    labeled = apply_debunk_labels(claim, labeled)
+    decision = decide(labeled, category="T6", claim_text=claim)
+    assert decision.verdict == "likely_true"
+    public, detail, label = map_verdict(decision.verdict, "fact")
+    assert public == "hypothesis"
+    assert detail == "likely_true"
+    assert label == "Hypothesis"
+
+
+def test_topic_overlap_alone_does_not_make_a_grid_claim_likely_true():
+    from factcheck.aggregate import decide
+    from factcheck.checks import entailment
+
+    claim = "Aging power grids are increasingly failing during severe storms, heatwaves, and floods."
+    page = "PNNL studies aging power grids and how storms affect infrastructure planning at the laboratory."
+    assert entailment(claim, page) == "neutral"
+    evidence = Evidence(
+        url="https://www.pnnl.gov/grid",
+        title="PNNL grid research",
+        snippet=page,
+        quote=page,
+        page_text=page,
+        grade="A",
+        source_type="primary",
+        origin_id="pnnl.gov",
+        entailment="neutral",
+        used=False,
+    )
+    assert decide([evidence], category="T6", claim_text=claim).verdict == "Unverified"
+
+
+def test_a_conflicting_claim_is_not_mostly_accurate():
+    rows = [
+        ClaimOut(text="The checked guidance is a 72-hour kit of food and water.", claim_type="fact", claim_category="T6", verdict="Supported", strength_of_support=0.8, confidence=0.8, reasoning="Official."),
+        ClaimOut(text="Stores were ordered to close nationwide.", claim_type="fact", claim_category="T6", verdict="Conflicting", strength_of_support=0.4, confidence=0.4, reasoning="Sources disagree."),
+        ClaimOut(text="One local detail could not be pinned down.", claim_type="fact", claim_category="T6", verdict="Unverified", strength_of_support=0.1, confidence=0.1, reasoning="No passage."),
+    ]
+    synopsis = build_synopsis(rows)
+    assert synopsis.rating in {"Partly verified", "Mixed"}
+    assert synopsis.rating != "Mostly accurate"
 
 
 def test_fortress_run_fallback_tldr_is_the_hoard_denial():
@@ -267,11 +344,14 @@ def test_fortress_run_fallback_tldr_is_the_hoard_denial():
         ClaimOut(text=assisted, claim_type="fact", claim_category="T6", verdict="Supported", strength_of_support=0.95, confidence=0.95, reasoning="Reported."),
     ]
     synopsis = build_synopsis(rows)
-    assert synopsis.tldr == denial
-    assert fortress not in synopsis.tldr
+    voiced = "Reputable sources report that the U.S. government has not told civilians to hoard 90 days of food."
+    assert synopsis.tldr == voiced
+    assert "FORTRESS" not in synopsis.tldr
     assert "Claims about" not in synopsis.summary
-    assert synopsis.summary.startswith("Partly verified. " + denial)
-    assert "FORTRESS America" in synopsis.summary
+    assert ", and " not in synopsis.summary
+    assert synopsis.summary.startswith("Partly verified. " + voiced)
+    assert "that rumor blew up" in synopsis.summary.lower()
+    assert ", and " not in synopsis.summary
     assert "AI-assisted cyberattacks" in synopsis.summary
     assert "freezers" not in synopsis.summary
     assert "3 claims could not be confirmed." in synopsis.summary
@@ -395,7 +475,7 @@ def test_abbreviations_stay_inside_the_sentence_and_the_tldr():
         ),
     ]
     synopsis = build_synopsis(rows)
-    assert synopsis.tldr == "A Pentagon initiative ordering major U.S. commands to stock supplies was misread as a civilian hoard order."
+    assert synopsis.tldr == "Reputable sources report that a Pentagon initiative ordering major U.S. commands to stock supplies was misread as a civilian hoard order."
     assert "U.S. commands" in synopsis.tldr
     assert "could not be confirmed" in synopsis.summary
     assert "Claims about" not in synopsis.summary

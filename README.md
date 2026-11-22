@@ -36,7 +36,7 @@ The public verdict on `/check`, `/v1/verify`, job reports, MCP tools, and stored
 | Verdict | When |
 | --- | --- |
 | supported | A tool result, a structured fact of record, two independent upper-scale sources, or two explicit debunks quote the claim. |
-| hypothesis | One good source makes it probably true (`verdict_detail` `likely_true`), or the claim is speculative (`verdict_detail` `speculative`). `verdict_label` is Hypothesis. A `likely_true` claim still counts toward Partly verified and Mostly accurate. |
+| hypothesis | One good source makes it probably true (`verdict_detail` `likely_true`), or the claim is speculative (`verdict_detail` `speculative`). `verdict_label` is Hypothesis. The summary says “Reputable sources report that …” instead of stating it as fact. A `likely_true` claim still counts toward Partly verified and Mostly accurate. |
 | opinion | Not true or false. The report says what mainstream fact-checkers wrote. |
 | conflicting | Sources disagree, or a quote goes against the claim (`verdict_detail` `contradicted`). The rating still treats a contradicted claim as against the claim. |
 | unverified | No usable passage. The claim was not confirmed, and it was not shown to be false. |

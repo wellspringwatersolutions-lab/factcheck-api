@@ -217,8 +217,8 @@ def test_three_lower_tier_sources_or_one_official_page_are_likely_true():
     official = Evidence(
         url="https://www.ready.gov/kit",
         title="Ready.gov",
-        snippet="Build a kit with supplies for several days, including water and food.",
-        page_text="Build a kit with supplies for several days, including water and food.",
+        snippet="Official guidance says households should build a kit with water and food.",
+        page_text="Official guidance says households should build a kit with water and food.",
         grade="A",
         source_type="primary",
         origin_id="ready.gov",

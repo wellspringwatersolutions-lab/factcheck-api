@@ -48,7 +48,8 @@ _ABSTAIN = "There wasn't enough evidence to settle this."
 _INSTRUCTION = """You write the bottom line from the verdict list only. You do not decide verdicts and you do not add facts.
 The rating is already fixed. summary must start with "{rating}" and be 2 to 4 complete sentences.
 tldr is one complete sentence of at most 35 words. It leads with a claim marked Supported or likely_true, preferably a denial.
-The sentence after the tldr may state up to two other Supported or likely_true claims, in full, as true.
+The sentences after the tldr state other claims one per sentence. Never join two claims with ", and".
+A Supported claim is stated plainly. A likely_true claim is "Reputable sources report that ...".
 State a Supported claim as true. A likely_true or Hypothesis claim is only probably true: phrase it as "Reputable sources report ...", not as a confirmed fact.
 A Contradicted claim is disputed: say the sources contradict or dispute it. Do not state it as true.
 Mention an Unverified claim only to say it could not be confirmed, and never lead with it.
@@ -136,7 +137,7 @@ def rate_claims(claims: list[ClaimOut]) -> tuple[str, list[str], int]:
     if contra_w == 0 and support_share >= 0.999:
         rating = "Mostly accurate" if unverified or likely or _has_nuance(supported) else "Accurate"
     elif support_share >= 0.6 and contra_share < 0.4:
-        rating = "Mostly accurate"
+        rating = "Partly verified" if (contradicted or conflicting) else "Mostly accurate"
     elif contra_share >= 0.85 and support_w == 0 and not unverified:
         rating = "Inaccurate"
     elif contra_share >= 0.6:
@@ -179,13 +180,9 @@ def fallback_summary(
     unverified = [claim for claim in facts if claim.verdict in {"Unverified", "Unsupported", None}]
     if unverified and rating in {"Partly verified", "Mostly accurate", "Accurate"}:
         sentence = _headline_text(facts) or _template_sentence(rating, claims)
-        extra = _also_confirmed(claims, sentence)
         count = len(unverified)
         word = "claim" if count == 1 else "claims"
-        parts = [f"{rating}.", sentence]
-        if extra:
-            parts.append(extra)
-        parts.append(f"{count} {word} could not be confirmed.")
+        parts = [f"{rating}.", sentence, *_extra_confirmed(claims, sentence), f"{count} {word} could not be confirmed."]
         return polish_prose(" ".join(parts))
     if rating == "Not enough evidence":
         parts = ["Not enough evidence."]
@@ -277,21 +274,24 @@ def _brief(rating: str, question: str | None, claims: list[ClaimOut]) -> str:
 
 
 def claim_counts(claims: list[ClaimOut]) -> SynopsisCounts:
-    counts = SynopsisCounts()
+    counts = SynopsisCounts(details={"likely_true": 0, "speculative": 0, "contradicted": 0})
     for claim in claims:
         if _unchecked(claim):
             counts.not_checked += 1
-        elif claim.verdict == "Hypothesis":
-            counts.hypothesis += 1
         elif claim.claim_type == "opinion":
             counts.opinion += 1
         elif claim.verdict == "Supported":
             counts.supported += 1
         elif claim.verdict == "likely_true":
-            counts.likely_true += 1
+            counts.hypothesis += 1
+            counts.details["likely_true"] += 1
+        elif claim.verdict == "Hypothesis":
+            counts.hypothesis += 1
+            counts.details["speculative"] += 1
         elif claim.verdict == "Contradicted":
-            counts.contradicted += 1
-        elif claim.verdict == "Conflicting":
+            counts.conflicting += 1
+            counts.details["contradicted"] += 1
+        elif claim.verdict in {"Conflicting", "Unsupported"}:
             counts.conflicting += 1
         else:
             counts.unverified += 1
@@ -408,28 +408,34 @@ def _unconfirmed_sentence(texts: list[str], topics: list[str] | None = None) -> 
     return " ".join(sentences)
 
 
-def _also_confirmed(claims: list[ClaimOut], headline: str, limit: int = 2) -> str:
-    """Up to two other confirmed claims, as one sentence. The headline is not repeated."""
-    head = headline.rstrip(".!?").strip()
+def _voiced(text: str, verdict: str | None) -> str:
+    """Supported claims are plain. likely_true is only what reputable sources report."""
+    sentence = _as_sentence(text)
+    if verdict not in {"likely_true", "Hypothesis"}:
+        return sentence
+    body = sentence[:-1] if sentence.endswith(".") else sentence
+    if body.lower().startswith("reputable sources report"):
+        return sentence
+    lowered = body[0].lower() + body[1:] if body else body
+    return f"Reputable sources report that {lowered}."
+
+
+def _extra_confirmed(claims: list[ClaimOut], headline: str, limit: int = 2) -> list[str]:
+    """Up to two other confirmed claims, each its own sentence. Never joined with ', and'."""
+    head = headline.rstrip(".!?").strip().lower()
     extras: list[str] = []
     for claim in _checked_facts(claims):
         if claim.verdict not in {"Supported", "likely_true"}:
             continue
-        sentence = _as_sentence(claim.text)
-        if sentence.rstrip(".!?").strip() == head:
+        sentence = _voiced(claim.text, claim.verdict)
+        if sentence.rstrip(".!?").strip().lower() == head:
+            continue
+        if "reputable sources report that " + _as_sentence(claim.text).rstrip(".").lower() == head:
             continue
         extras.append(sentence)
         if len(extras) >= limit:
             break
-    if not extras:
-        return ""
-    if len(extras) == 1:
-        return extras[0]
-    first = extras[0].rstrip(".")
-    second = extras[1].rstrip(".")
-    if len(second) > 1 and second[0].isupper() and second[1].islower():
-        second = second[0].lower() + second[1:]
-    return f"{first}, and {second}."
+    return extras
 
 
 def _as_sentence(text: str) -> str:
@@ -453,7 +459,7 @@ def _headline_text(claims: list[ClaimOut] | None, limit: int = 35) -> str:
     ordered = denials + others
     fallback = ""
     for claim in ordered:
-        sentence = _as_sentence(claim.text)
+        sentence = _voiced(claim.text, claim.verdict)
         if not complete_sentence(sentence):
             continue
         if not fallback:
@@ -546,7 +552,7 @@ def _phrasing_ok(summary: str, tldr: str, rating: str, claims: list[ClaimOut] | 
     if not summary.lower().startswith((rating or "").lower()):
         return False
     sentences = split_sentences(summary)
-    if not 2 <= len(sentences) <= 4:
+    if not 2 <= len(sentences) <= 5:
         return False
     if not all(_summary_sentence_ok(sentence, rating) for sentence in sentences):
         return False
@@ -593,7 +599,20 @@ def _phrasing_ok(summary: str, tldr: str, rating: str, claims: list[ClaimOut] | 
             return False
         if not _voice_ok(sentence, probable, disputed):
             return False
+        if ", and " in sentence.lower() and _uses_two_claims(sentence, claims):
+            return False
     return True
+
+
+def _uses_two_claims(sentence: str, claims: list[ClaimOut]) -> bool:
+    marks = _marks(sentence)
+    hits = 0
+    for claim in _checked_facts(claims):
+        if claim.verdict not in {"Supported", "likely_true", "Hypothesis", "Contradicted"}:
+            continue
+        if _marks(claim.text) & marks:
+            hits += 1
+    return hits >= 2
 
 
 def _marks(text: str) -> set[str]:

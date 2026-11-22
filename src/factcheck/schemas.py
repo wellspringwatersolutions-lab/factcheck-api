@@ -123,14 +123,15 @@ class DraftAnswer(BaseModel):
 
 
 class SynopsisCounts(BaseModel):
+    """Public verdict totals. Finer states sit under details."""
+
     supported: int = 0
-    likely_true: int = 0
-    contradicted: int = 0
-    conflicting: int = 0
-    unverified: int = 0
     hypothesis: int = 0
     opinion: int = 0
+    conflicting: int = 0
+    unverified: int = 0
     not_checked: int = 0
+    details: dict[str, int] = Field(default_factory=dict)
 
 
 class SynopsisOut(BaseModel):

@@ -30,7 +30,7 @@ from factcheck.request_ctx import (
     retrieval_calls,
     set_phase,
 )
-from factcheck.checks import apply_debunk_labels, entailment, is_debunk
+from factcheck.checks import apply_debunk_labels, entailment, factchecker_relation, is_debunk
 from factcheck.retain import (
     blocked_site,
     drop_invented_negative,
@@ -119,7 +119,13 @@ def _share_factchecks(claims: list[ClaimOut]) -> None:
                     page_text=text,
                     grade=source.grade or "B",
                     source_type=source.source_type or "fact_checker",
-                    entailment="entails" if is_debunk(text) or _encyclopedia_source(source) else (source.entailment or "neutral"),
+                    entailment=(
+                        "entails"
+                        if factchecker_relation(claim.text, text) == "entails" or (_encyclopedia_source(source) and not is_debunk(text))
+                        else "contradicts"
+                        if factchecker_relation(claim.text, text) == "contradicts"
+                        else (source.entailment or "neutral")
+                    ),
                     used=True,
                     origin_id=source.origin_id or source.url,
                 )
@@ -769,7 +775,7 @@ class VerificationService:
                     tie = self.ranker_tie.rank([claim], chosen)
                     if tie:
                         votes.append(tie[0])
-                chosen = apply_verified_labels(chosen, votes)
+                chosen = apply_verified_labels(chosen, votes, claim.text)
             chosen = apply_debunk_labels(claim.text, chosen)
             context = current_request().question if current_request() else ""
             chosen = [

@@ -47,10 +47,11 @@ def test_food_tldr_uses_the_denial_and_rejects_a_bad_chutes_draft():
         _claim("In mid-October 2026 a supermarket cyberattack knocked freezers offline.", "Unverified", 0.1, reasoning="No retrieved passage backs this claim."),
     ]
     synopsis = build_synopsis(rows)
-    assert synopsis.tldr == denial
+    assert synopsis.tldr == "Reputable sources report that the U.S. government has not told civilians to hoard 90 days of food."
     assert "rumor" not in synopsis.tldr.lower()
     assert "Claims about" not in synopsis.summary
-    assert synopsis.summary.startswith("Partly verified. " + denial)
+    assert ", and " not in synopsis.summary
+    assert synopsis.summary.startswith("Partly verified. " + synopsis.tldr)
     assert "1 claim could not be confirmed." in synopsis.summary
 
     def phrase(brief, rating, claims=None):
@@ -60,7 +61,7 @@ def test_food_tldr_uses_the_denial_and_rejects_a_bad_chutes_draft():
         }
 
     rejected = build_synopsis(rows, phrasing=phrase)
-    assert rejected.tldr == denial
+    assert rejected.tldr.startswith("Reputable sources report that the U.S. government has not told")
     assert "supermarket" not in rejected.tldr.lower()
 
 
@@ -78,15 +79,15 @@ def test_chutes_retries_the_other_model_when_the_first_bottom_line_is_rejected()
         '"tldr": "In mid-October 2026 a supermarket cyberattack knocked freezers offline."}'
     )
     good = (
-        '{"summary": "Partly verified. The U.S. government has not told civilians to hoard 90 days of food. '
+        '{"summary": "Partly verified. Reputable sources report that the U.S. government has not told civilians to hoard 90 days of food. '
         'One claim could not be confirmed.", '
-        '"tldr": "The U.S. government has not told civilians to hoard 90 days of food."}'
+        '"tldr": "Reputable sources report that the U.S. government has not told civilians to hoard 90 days of food."}'
     )
     scripted = ScriptedLLM([bad, good])
     writer = LLMSynopsis(scripted, "Qwen/Qwen3.5-397B-A17B-TEE", UsageMeter(), settings())
     synopsis = build_synopsis(rows, phrasing=writer)
     assert [call["model"] for call in scripted.calls] == [writer.models[0], writer.models[1]]
-    assert synopsis.tldr == denial
+    assert synopsis.tldr == "Reputable sources report that the U.S. government has not told civilians to hoard 90 days of food."
     assert "supermarket" not in synopsis.tldr.lower()
 
 
@@ -104,7 +105,7 @@ def test_synopsis_shape_includes_the_caveat():
     assert synopsis.caveats
     assert synopsis.unchecked_count == 0
     assert synopsis.counts.supported == 3
-    assert synopsis.counts.model_dump()["contradicted"] == 0
+    assert synopsis.counts.details["contradicted"] == 0
 
 
 def test_synopsis_falls_back_when_phrasing_fails_or_invents_a_fact():
@@ -192,13 +193,12 @@ def test_counts_put_each_claim_in_one_bucket():
     counts = build_synopsis(rows).counts
     assert counts.model_dump() == {
         "supported": 1,
-        "likely_true": 0,
-        "contradicted": 1,
-        "conflicting": 1,
-        "unverified": 1,
         "hypothesis": 1,
         "opinion": 1,
+        "conflicting": 2,
+        "unverified": 1,
         "not_checked": 1,
+        "details": {"likely_true": 0, "speculative": 1, "contradicted": 1},
     }
 
 
@@ -244,7 +244,7 @@ def test_mostly_unverified_stays_cautious():
     assert synopsis.counts.unverified == 4
     assert synopsis.counts.supported == 1
     assert synopsis.counts.not_checked == 1
-    assert synopsis.counts.contradicted == 0
+    assert synopsis.counts.details["contradicted"] == 0
 
 
 def test_bare_question_detection():

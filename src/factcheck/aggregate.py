@@ -172,13 +172,11 @@ def _primary_source(passage: Evidence) -> bool:
 
 def _agrees(claim_text: str, passage: Evidence) -> bool:
     text = (passage.quote or passage.snippet or passage.page_text or "").strip()
-    if len(text) < 40 or _DATELINE.match(text) or passage.entailment == "contradicts":
+    if len(text) < 40 or _DATELINE.match(text) or passage.entailment != "entails":
         return False
-    if passage.entailment == "entails":
-        return True
-    from factcheck.textutil import overlap
+    from factcheck.checks import _clearly_backs
 
-    return overlap(claim_text, text) >= 0.35
+    return _clearly_backs(claim_text, text)
 
 
 def _independent_agreements(claim_text: str, passages: list[Evidence]) -> list[Evidence]:
@@ -204,13 +202,11 @@ def _backs_substance(claim_text: str, passage: Evidence) -> bool:
     text = (passage.quote or passage.snippet or passage.page_text or "").strip()
     if len(text) < 40 or _DATELINE.match(text):
         return False
-    if passage.entailment == "contradicts":
+    if passage.entailment != "entails":
         return False
-    if passage.entailment == "entails":
-        return True
-    from factcheck.textutil import overlap
+    from factcheck.checks import _clearly_backs
 
-    return overlap(claim_text, text) >= 0.4
+    return _clearly_backs(claim_text, text)
 
 
 def _mark_likely(passages: list[Evidence]) -> None:
@@ -259,6 +255,18 @@ def decide(
 ) -> Decision:
     """Decide from evidence. `judge_votes_ignored` documents that votes are not an input."""
     del judge_votes_ignored
+    from factcheck.checks import entailment as _entail
+
+    for passage in passages:
+        if passage.entailment:
+            continue
+        text = passage.quote or passage.snippet or passage.page_text or ""
+        relation = _entail(claim_text, text) if claim_text else "neutral"
+        if relation in {"entails", "contradicts"}:
+            passage.entailment = relation
+            passage.used = True
+            if not passage.quote:
+                passage.quote = text[:400]
     supporting = _independent(passages, "entails")
     contradicting = _independent(passages, "contradicts")
     for passage in passages:

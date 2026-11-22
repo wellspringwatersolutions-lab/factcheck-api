@@ -130,13 +130,12 @@ def to_check_report(result: VerificationOut, input_text: str) -> dict:
             "unchecked_count": 0,
             "counts": {
                 "supported": 0,
-                "contradicted": 0,
-                "conflicting": 0,
-                "likely_true": 0,
-                "unverified": 0,
                 "hypothesis": 0,
                 "opinion": 0,
+                "conflicting": 0,
+                "unverified": 0,
                 "not_checked": 0,
+                "details": {"likely_true": 0, "speculative": 0, "contradicted": 0},
             },
         }
     else:
