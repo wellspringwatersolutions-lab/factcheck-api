@@ -97,6 +97,8 @@ def test_limit_responses_send_retry_after_and_every_response_has_a_request_id(ca
 
 
 def test_mcp_start_check_returns_a_job_the_get_job_tool_can_poll():
+    import threading
+
     from factcheck.mcp_server import set_identity
     from tests.conftest import client
 
@@ -107,12 +109,12 @@ def test_mcp_start_check_returns_a_job_the_get_job_tool_can_poll():
     accepted = json.loads(started.content[0].text)
     assert accepted["status"] == "queued"
     job_id = accepted["job_id"]
-    payload = {}
-    for _ in range(40):
-        polled = asyncio.run(mcp.call_tool("get_job", {"job_id": job_id}))
-        payload = json.loads(polled.content[0].text)
-        if payload["status"] in {"done", "error"}:
-            break
+    worker = next((thread for thread in threading.enumerate() if thread.name == f"factcheck-job-{job_id[:8]}"), None)
+    if worker is not None:
+        worker.join(timeout=10)
+        assert not worker.is_alive()
+    polled = asyncio.run(mcp.call_tool("get_job", {"job_id": job_id}))
+    payload = json.loads(polled.content[0].text)
     assert payload["status"] == "done"
     assert "progress" in payload
     assert payload["report"]["claims"][0]["claim"]

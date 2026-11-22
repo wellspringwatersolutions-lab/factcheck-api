@@ -271,6 +271,9 @@ def test_fortress_run_fallback_tldr_is_the_hoard_denial():
     assert fortress not in synopsis.tldr
     assert "Claims about" not in synopsis.summary
     assert synopsis.summary.startswith("Partly verified. " + denial)
+    assert "FORTRESS America" in synopsis.summary
+    assert "AI-assisted cyberattacks" in synopsis.summary
+    assert "freezers" not in synopsis.summary
     assert "3 claims could not be confirmed." in synopsis.summary
 
 

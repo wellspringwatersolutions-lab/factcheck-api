@@ -46,8 +46,9 @@ _STOP = {
 }
 _ABSTAIN = "There wasn't enough evidence to settle this."
 _INSTRUCTION = """You write the bottom line from the verdict list only. You do not decide verdicts and you do not add facts.
-The rating is already fixed. summary must start with "{rating}" and be 2 or 3 complete sentences.
+The rating is already fixed. summary must start with "{rating}" and be 2 to 4 complete sentences.
 tldr is one complete sentence of at most 35 words. It leads with a claim marked Supported or likely_true, preferably a denial.
+The sentence after the tldr may state up to two other Supported or likely_true claims, in full, as true.
 State a fact as true only when that claim is Supported or likely_true.
 Mention an Unverified claim only to say it could not be confirmed, and never lead with it.
 Do not cut a sentence off in the middle. Use a shorter confirmed claim instead of trimming a long one.
@@ -177,9 +178,14 @@ def fallback_summary(
     unverified = [claim for claim in facts if claim.verdict in {"Unverified", "Unsupported", None}]
     if unverified and rating in {"Partly verified", "Mostly accurate", "Accurate"}:
         sentence = _headline_text(facts) or _template_sentence(rating, claims)
+        extra = _also_confirmed(claims, sentence)
         count = len(unverified)
         word = "claim" if count == 1 else "claims"
-        return polish_prose(f"{rating}. {sentence} {count} {word} could not be confirmed.")
+        parts = [f"{rating}.", sentence]
+        if extra:
+            parts.append(extra)
+        parts.append(f"{count} {word} could not be confirmed.")
+        return polish_prose(" ".join(parts))
     if rating == "Not enough evidence":
         parts = ["Not enough evidence."]
         if question:
@@ -401,6 +407,30 @@ def _unconfirmed_sentence(texts: list[str], topics: list[str] | None = None) -> 
     return " ".join(sentences)
 
 
+def _also_confirmed(claims: list[ClaimOut], headline: str, limit: int = 2) -> str:
+    """Up to two other confirmed claims, as one sentence. The headline is not repeated."""
+    head = headline.rstrip(".!?").strip()
+    extras: list[str] = []
+    for claim in _checked_facts(claims):
+        if claim.verdict not in {"Supported", "likely_true"}:
+            continue
+        sentence = _as_sentence(claim.text)
+        if sentence.rstrip(".!?").strip() == head:
+            continue
+        extras.append(sentence)
+        if len(extras) >= limit:
+            break
+    if not extras:
+        return ""
+    if len(extras) == 1:
+        return extras[0]
+    first = extras[0].rstrip(".")
+    second = extras[1].rstrip(".")
+    if len(second) > 1 and second[0].isupper() and second[1].islower():
+        second = second[0].lower() + second[1:]
+    return f"{first}, and {second}."
+
+
 def _as_sentence(text: str) -> str:
     sentence = " ".join((text or "").split()).strip()
     if sentence and sentence[-1] not in ".!?":
@@ -495,6 +525,14 @@ def _says_not_enough(text: str) -> bool:
     return "not enough evidence" in lowered or "enough evidence to settle" in lowered or "wasn't enough evidence" in lowered
 
 
+def _summary_sentence_ok(sentence: str, rating: str) -> bool:
+    if sentence.rstrip(".").lower() == (rating or "").lower():
+        return True
+    if re.fullmatch(r"\d+ claims? could not be confirmed\.", sentence or ""):
+        return True
+    return complete_sentence(sentence)
+
+
 def _phrasing_ok(summary: str, tldr: str, rating: str, claims: list[ClaimOut] | None) -> bool:
     """Accept a model bottom line only when it is whole sentences drawn from the verdicts."""
     tldr = (tldr or "").strip()
@@ -507,9 +545,9 @@ def _phrasing_ok(summary: str, tldr: str, rating: str, claims: list[ClaimOut] | 
     if not summary.lower().startswith((rating or "").lower()):
         return False
     sentences = split_sentences(summary)
-    if not 2 <= len(sentences) <= 3:
+    if not 2 <= len(sentences) <= 4:
         return False
-    if not all(sentence.rstrip(".").lower() == (rating or "").lower() or complete_sentence(sentence) for sentence in sentences):
+    if not all(_summary_sentence_ok(sentence, rating) for sentence in sentences):
         return False
     confirmed = set()
     unverified_only = set()

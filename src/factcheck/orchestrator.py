@@ -17,7 +17,7 @@ from factcheck.aggregate import RULES_VERSION, decide
 from factcheck.categories import CATEGORIES, EFFORT_LIMITS, effort_for, is_math, normalize_claim
 from factcheck.checks import UrlChecker, apply_passage_checks, passage_check_rows
 from factcheck.cleanup import focus_query, is_bare_question, peel_leading_question, priority, split_dialogue, strip_labels
-from factcheck.extract import fallback_points, heuristic_extract, select_key_points, standalone_claim
+from factcheck.extract import fallback_points, heuristic_extract, resolve_pronouns, select_key_points, standalone_claim
 from factcheck.queries import heuristic_queries, news_window, wikipedia_event_query
 from factcheck.request_ctx import (
     add_phase,
@@ -425,6 +425,7 @@ class VerificationService:
                             warnings.append("extraction_fallback:TimeoutError")
             for item in extracted:
                 item.text = strip_labels(item.text)
+                item.text, _dropped = resolve_pronouns(item.text, check_text or "")
             if mode == "question":
                 extracted = drop_invented_negative(extracted, asked)
                 have = {" ".join(item.text.lower().split()) for item in extracted}

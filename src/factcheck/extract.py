@@ -147,18 +147,36 @@ def heuristic_label(text: str) -> str:
 
 
 def resolve_pronouns(text: str, context: str) -> tuple[str, bool]:
-    """Keep the original words. Do not rewrite contractions or filler like 'Of course' or 'That said'."""
+    """Replace a leading He/She/They with the person named just before it.
+
+    Contractions and filler such as 'Of course' or 'That said' stay as written.
+    """
     if re.search(r"\bThat said\b", text) or re.search(r"\bOf course\b", text):
         return text, False
-    match = _PRONOUN.search(text)
-    if not match:
-        return text, False
-    antecedent = re.search(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\b", context or "")
-    if not antecedent or antecedent.group(1) in _BAD_ANTECEDENT or antecedent.group(1) == match.group(1):
+    match = _PRONOUN.match(text or "")
+    if not match or match.group(1) not in {"He", "She", "They"}:
         return text, False
     if match.start() > 0 and text[match.start() - 1] in {"'", "’"}:
         return text, False
-    return text, False
+    name = _nearest_name(context or "", text, match.group(1))
+    if not name:
+        return text, False
+    return name + text[match.end():], False
+
+
+_SUBJECT_NAME = re.compile(r"(?:^|[.!?]\s+)([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2})\b")
+
+
+def _nearest_name(context: str, sentence: str, pronoun: str) -> str:
+    index = (context or "").find(sentence) if sentence else -1
+    prior = context[:index] if index > 0 else (context or "")
+    chosen = ""
+    for match in _SUBJECT_NAME.finditer(prior):
+        name = match.group(1)
+        if name.split()[0] in _BAD_ANTECEDENT or name in {"He", "She", "They", "It", "This", "That"}:
+            continue
+        chosen = name
+    return chosen
 
 
 def heuristic_extract(text: str | None, claims: list[str] | None) -> list[ExtractedClaim]:
@@ -169,7 +187,7 @@ def heuristic_extract(text: str | None, claims: list[str] | None) -> list[Extrac
         label = heuristic_label(sentence.text)
         if label == "drop":
             continue
-        resolved, drop = resolve_pronouns(sentence.text, sentence.context)
+        resolved, drop = resolve_pronouns(sentence.text, prepared or sentence.context)
         if drop:
             continue
         claim = ExtractedClaim(

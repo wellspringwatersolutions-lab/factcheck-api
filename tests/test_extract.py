@@ -76,6 +76,19 @@ def test_live_extractor_runs_three_stages_and_falls_back():
     assert "90 days" in from_list[0].text
 
 
+def test_a_leading_he_becomes_the_named_person():
+    text = (
+        "John Adams was the second president from 1797 to 1801. "
+        "He defended the British soldiers at the Boston Massacre trial. "
+        "He was a Founding Father and vice president under Washington."
+    )
+    claims = heuristic_extract(text, None)
+    texts = [claim.text for claim in claims]
+    assert "John Adams was a Founding Father and vice president under Washington." in texts
+    assert "John Adams defended the British soldiers at the Boston Massacre trial." in texts
+    assert not any(claim.startswith("He ") for claim in texts)
+
+
 def test_splitter_keeps_of_course_and_that_said():
     claims = heuristic_extract(
         "Of course. It's the Eiffel Tower in Paris. That said, the tower opened in 1889.",
