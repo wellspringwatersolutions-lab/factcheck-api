@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from factcheck.publish import map_verdict
+from factcheck.publish import confidence_and_action, map_verdict
 from factcheck.schemas import VerificationOut
 from factcheck.textutil import hostname
 
@@ -52,9 +52,9 @@ def _source_type(raw: str, url: str) -> str:
     return _SOURCE_TYPE.get(raw, raw or "secondary")
 
 
-def to_check_report(result: VerificationOut, input_text: str) -> dict:
-    claims = []
-    for claim in result.claims:
+def check_claim_rows(claims, input_text: str) -> list[dict]:
+    rows = []
+    for claim in claims:
         verdict, detail, label = map_verdict(claim.verdict, claim.claim_type, claim.verdict_detail)
         sources = []
         for source in claim.sources:
@@ -108,6 +108,8 @@ def to_check_report(result: VerificationOut, input_text: str) -> dict:
             "verdict": verdict,
             "verdict_label": label,
             "verdict_detail": detail,
+            "confidence": confidence_and_action(claim.verdict, claim.claim_type, claim.confidence)[0],
+            "recommended_action": confidence_and_action(claim.verdict, claim.claim_type, claim.confidence)[1],
             "span": claim.span,
             "strength_of_support": claim.strength_of_support,
             "checked_at": claim.checked_at,
@@ -118,7 +120,12 @@ def to_check_report(result: VerificationOut, input_text: str) -> dict:
         if start >= 0:
             row["start"] = start
             row["end"] = start + len(needle)
-        claims.append(row)
+        rows.append(row)
+    return rows
+
+
+def to_check_report(result: VerificationOut, input_text: str) -> dict:
+    claims = check_claim_rows(result.claims, input_text)
     synopsis = result.synopsis
     if synopsis is None:
         synopsis_out = {
@@ -177,9 +184,13 @@ def to_check_report(result: VerificationOut, input_text: str) -> dict:
             "estimated_cost_usd": result.usage.estimated_cost_usd,
             "retriever_cost_usd": result.usage.retriever_cost_usd,
             "retrieval_calls": result.usage.retrieval_calls,
+            "cached_claims": result.usage.cached_claims,
             "drops": dict(result.usage.drops),
             "credits_charged": result.usage.credits_charged,
             "tier": result.usage.tier,
+            "caller": result.usage.caller,
+            "tester_budget_remaining_usd": result.usage.tester_budget_remaining_usd,
+            "budget_remaining_usd": result.usage.budget_remaining_usd,
             "models": dict(result.usage.models),
         },
     }

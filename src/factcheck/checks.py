@@ -166,11 +166,9 @@ def factchecker_relation(claim: str, passage: str) -> str | None:
     from factcheck.textutil import split_sentences
 
     for sentence in split_sentences(passage) or [passage]:
-        if overlap(claim, sentence) < 0.45:
-            continue
         if is_debunk(sentence) and has_negation(claim) != has_negation(sentence):
             continue
-        if has_negation(claim) == has_negation(sentence) and _clearly_backs(claim, sentence):
+        if has_negation(claim) == has_negation(sentence) and overlap(claim, sentence) >= 0.35 and not is_debunk(sentence):
             return "entails"
     if not is_denial(claim) and _RUMOR_ASSERTION.search(claim or "") and overlap(claim, passage) >= 0.25:
         return "contradicts"

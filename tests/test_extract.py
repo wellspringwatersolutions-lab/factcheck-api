@@ -89,6 +89,23 @@ def test_a_leading_he_becomes_the_named_person():
     assert not any(claim.startswith("He ") for claim in texts)
 
 
+def test_no_is_not_treated_as_a_persons_name():
+    from factcheck.extract import resolve_pronouns
+
+    resolved, _dropped = resolve_pronouns(
+        "He was a Founding Father and vice president under Washington.",
+        "No. He was a Founding Father and vice president under Washington.",
+    )
+    assert resolved.startswith("He ")
+    assert not resolved.startswith("No ")
+    named, _dropped = resolve_pronouns(
+        "He was a Founding Father and vice president under Washington.",
+        "Was John Adams a criminal?\nNo. He was a Founding Father and vice president under Washington.",
+    )
+    assert named.startswith("John Adams ")
+    assert not named.startswith("No ")
+
+
 def test_splitter_keeps_of_course_and_that_said():
     claims = heuristic_extract(
         "Of course. It's the Eiffel Tower in Paris. That said, the tower opened in 1889.",

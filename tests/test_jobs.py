@@ -60,6 +60,48 @@ def test_a_slow_extractor_is_cut_off_and_retrieval_still_runs():
     assert any(item.startswith("extraction_fallback:TimeoutError") for item in result.warnings)
 
 
+def test_a_question_stays_inside_the_budget_when_chutes_is_slow():
+    from factcheck.review import TwoPassReview
+
+    service, _, _, cfg = make_service()
+
+    def slow_draft(question):
+        time.sleep(3)
+        return ("mock", "John Adams was the second president. He was a Founding Father.", "no")
+
+    class Slow:
+        def extract(self, text, claims):
+            time.sleep(30)
+            return [], []
+
+        def retry_keypoints(self, text):
+            time.sleep(30)
+            return []
+
+    class Sleepy:
+        def complete(self, **kwargs):
+            time.sleep(30)
+            raise TimeoutError("review")
+
+    service.drafter = slow_draft
+    service.extractor = Slow()
+    service.reviewer = TwoPassReview(Sleepy(), cfg)
+    started = time.monotonic()
+    result = service.verify(
+        text="Was John Adams a criminal?",
+        claims=None,
+        client=client(),
+        charge=False,
+        budget=8,
+        started_at=started,
+    )
+    assert time.monotonic() - started < 10
+    assert result.synopsis.rating == "Not enough evidence"
+    assert result.synopsis.answer == "not_enough_evidence"
+    assert result.claims
+    assert all(claim.effort == "skipped" for claim in result.claims)
+
+
 def test_async_check_returns_a_job_the_site_can_poll():
     service, _, _, cfg = make_service()
     app = create_app(settings=cfg, service=service)

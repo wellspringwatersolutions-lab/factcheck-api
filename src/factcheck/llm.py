@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import json
+import logging
 from dataclasses import dataclass
 
 import httpx
 
 from factcheck.config import Settings
 from factcheck.textutil import parse_json_object
+
+logger = logging.getLogger("factcheck.llm")
 
 
 class LLMError(RuntimeError):
@@ -76,22 +80,24 @@ class OpenAICompatClient:
         }
         headers = {"Authorization": f"Bearer {self.api_key}"}
         url = f"{self.base_url}/chat/completions"
-        response = self._post(url, payload, headers, timeout=timeout)
+        response = self._call(url, payload, headers, timeout=timeout, model=use_model)
         if response.status_code == 400:
+            self._log_failure(use_model, kind="error", status=400, body=self._snippet(response))
             for key in ("chat_template_kwargs", "enable_thinking", "reasoning_effort", "response_format"):
                 payload.pop(key, None)
-            response = self._post(url, payload, headers, timeout=timeout)
-        response.raise_for_status()
-        content, usage, served = self._read(response)
+            response = self._call(url, payload, headers, timeout=timeout, model=use_model)
+        self._raise(response, use_model)
+        content, usage, served = self._read_logged(response, use_model)
         claims_schema = (response_format or {}).get("json_schema", {}).get("name") == "claims"
         # Judges sometimes return an empty body. Extraction must keep the raw body so the
         # failure is logged, and must not spend a second call repairing it.
         if not content.strip() and not claims_schema:
-            retry = self._post(url, payload, headers, timeout=timeout)
-            retry.raise_for_status()
-            content, usage, served = self._read(retry)
+            retry = self._call(url, payload, headers, timeout=timeout, model=use_model)
+            self._raise(retry, use_model)
+            content, usage, served = self._read_logged(retry, use_model)
         if not content.strip() and not claims_schema:
             content = '{"passages": []}'
+        self._note_bad_json(content, use_model, response.status_code)
         return LLMResult(
             content=content,
             input_tokens=int(usage.get("prompt_tokens") or 0),
@@ -103,6 +109,63 @@ class OpenAICompatClient:
 
     def _post(self, url: str, payload: dict, headers: dict, timeout: float | None = None) -> httpx.Response:
         return self._client.post(url, json=payload, headers=headers, timeout=timeout or self.timeout)
+
+    def _call(self, url: str, payload: dict, headers: dict, timeout: float | None, model: str) -> httpx.Response:
+        try:
+            return self._post(url, payload, headers, timeout=timeout)
+        except httpx.TimeoutException as exc:
+            self._log_failure(model, kind="timeout", body=exc.__class__.__name__)
+            raise
+        except httpx.HTTPError as exc:
+            self._log_failure(model, kind="error", body=exc.__class__.__name__)
+            raise
+
+    def _raise(self, response: httpx.Response, model: str) -> None:
+        if response.status_code < 400:
+            return
+        self._log_failure(model, kind="error", status=response.status_code, body=self._snippet(response))
+        response.raise_for_status()
+
+    def _read_logged(self, response: httpx.Response, model: str) -> tuple[str, dict, str]:
+        try:
+            return self._read(response)
+        except ValueError:
+            self._log_failure(model, kind="bad_json", status=response.status_code, body=self._snippet(response))
+            raise
+
+    def _note_bad_json(self, content: str, model: str, status: int) -> None:
+        text = (content or "").strip()
+        if not text:
+            return
+        try:
+            json.loads(text)
+        except json.JSONDecodeError:
+            self._log_failure(model, kind="bad_json", status=status, body=self._snippet_text(text))
+
+    def _snippet(self, response: httpx.Response) -> str:
+        try:
+            text = response.text or ""
+        except Exception:  # noqa: BLE001 - logging must not hide the original failure
+            text = ""
+        return self._snippet_text(text)
+
+    def _snippet_text(self, text: str) -> str:
+        snippet = " ".join((text or "").split())[:180]
+        secret = self.api_key or ""
+        if secret and secret in snippet:
+            snippet = snippet.replace(secret, "[redacted]")
+        return snippet
+
+    def _log_failure(self, model: str, *, kind: str, status: int | None = None, body: str = "") -> None:
+        """One line per failed call. The key is never written."""
+        body = self._snippet_text(body)
+        quota = status == 402 or any(
+            word in body.lower() for word in ("quota", "insufficient_quota", "billing", "balance", "credit")
+        )
+        if quota:
+            logger.warning("chutes balance/quota model=%s status=%s kind=%s body=%s", model, status, kind, body)
+            return
+        logger.warning("chutes failure model=%s kind=%s status=%s body=%s", model, kind, status, body)
 
     @staticmethod
     def _read(response: httpx.Response) -> tuple[str, dict, str]:

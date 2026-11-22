@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from urllib.parse import urlparse
 
 import asyncio
+import json
 import logging
 import time
 from uuid import uuid4
@@ -14,22 +15,28 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
-from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, StreamingResponse
 from mcp.server.transport_security import TransportSecuritySettings
 
+from factcheck.accuracy import build_proposals, public_report, run_accuracy
 from factcheck.billing import BillingError, ClientIdentity, owner_ips, owner_key_matches, resolve_client_ip
+from factcheck.spend import match_digest
 from factcheck.constitution import constitution_document, constitution_markdown
 from factcheck.questions import DraftError
 from factcheck.config import Settings, get_settings
 from factcheck.discovery import llms_txt, manifest
+from factcheck.feedback import FeedbackError, record_feedback
+from factcheck.trial import TrialError
 from factcheck.jobs import enqueue_check
 from factcheck.mcp_server import build_mcp, current_identity, reset_identity, set_identity
 from factcheck.payments import StripeCreditPacks, TaoDeposits
 from factcheck.publish import publish_verification
+from factcheck.redact import install_log_redaction
 from factcheck.report_html import render_home, render_report
 from factcheck.schemas import (
     CheckReportOut,
     ErrorResponse,
+    FeedbackIn,
     JobAccepted,
     JobStatusOut,
     PublicVerificationOut,
@@ -95,13 +102,17 @@ def _request_id(request: Request) -> str:
     return str(getattr(getattr(request, "state", None), "request_id", "") or "")
 
 
-def _error(request: Request, status: int, code: str, message: str, retry_after: int | None = None, upgrade_url: str | None = None):
+def _error(request: Request, status: int, code: str, message: str, retry_after: int | None = None, upgrade_url: str | None = None, remaining_usd: float | None = None, reset_at: str | None = None):
     rid = _request_id(request)
     error = {"code": code, "message": message, "request_id": rid}
     if upgrade_url:
         error["upgrade_url"] = upgrade_url
     if retry_after is not None:
         error["retry_after"] = retry_after
+    if remaining_usd is not None:
+        error["remaining_usd"] = remaining_usd
+    if reset_at:
+        error["reset_at"] = reset_at
     headers = {}
     if retry_after is not None:
         headers["Retry-After"] = str(retry_after)
@@ -121,9 +132,10 @@ def _stamp(request: Request, payload: dict) -> dict:
 
 
 class IdentityMiddleware:
-    def __init__(self, app, settings: Settings | None = None):
+    def __init__(self, app, settings: Settings | None = None, service=None):
         self.app = app
         self.settings = settings
+        self.service = service
 
     async def __call__(self, scope, receive, send):
         if scope.get("type") != "http":
@@ -135,13 +147,34 @@ class IdentityMiddleware:
         api_key = auth[7:].strip() if auth.lower().startswith("bearer ") else headers.get("x-api-key")
         ip = resolve_client_ip(headers, str(client[0]))
         configured_ips = owner_ips(self.settings.owner_ips) if self.settings else set()
-        owner = ip in configured_ips or owner_key_matches(headers.get("x-owner-key"), self.settings.owner_key if self.settings else "")
+        owner_secret = self.settings.owner_key if self.settings else ""
+        owner = ip in configured_ips or owner_key_matches(headers.get("x-owner-key"), owner_secret) or owner_key_matches(api_key, owner_secret)
+        tester_hash = ""
+        agent_name = ""
+        agent_hash = ""
+        billing = getattr(self.service, "billing", None)
+        if self.settings and api_key and not owner and billing is not None:
+            if hasattr(billing, "agents"):
+                agent_hash = match_digest(api_key, list(billing.agents))
+                if agent_hash:
+                    agent_name = billing.agents[agent_hash][0]
+            if not agent_hash and hasattr(billing, "tester_digests"):
+                tester_hash = match_digest(api_key, billing.tester_digests())
+        trial_hash = ""
+        if self.settings and api_key and not owner and not agent_hash and not tester_hash and billing is not None and hasattr(billing, "trials"):
+            trial_hash = match_digest(api_key, billing.trials.digests())
         identity = ClientIdentity(
             ip=ip,
             user_agent=headers.get("user-agent", ""),
             fingerprint_header=headers.get("x-client-fingerprint", ""),
-            api_key=api_key or None,
+            api_key=None if (tester_hash or agent_hash or trial_hash) else (api_key or None),
             owner=owner,
+            tester=bool(tester_hash),
+            tester_hash=tester_hash,
+            agent_name=agent_name,
+            agent_hash=agent_hash,
+            trial=bool(trial_hash),
+            trial_hash=trial_hash,
         )
         token = set_identity(identity)
         try:
@@ -166,6 +199,7 @@ def _security(settings: Settings) -> TransportSecuritySettings:
 
 
 def create_app(settings: Settings | None = None, service=None) -> FastAPI:
+    install_log_redaction()
     settings = settings or get_settings()
     if settings.llm_mode == "auto" and not any(
         [settings.chutes_api_key, settings.soma_api_key, settings.openai_compat_api_key]
@@ -176,6 +210,7 @@ def create_app(settings: Settings | None = None, service=None) -> FastAPI:
         "google fact-check retriever %s",
         "enabled" if settings.google_factcheck_api_key else "disabled",
     )
+    logger.warning("harnyx reader %s", "enabled" if settings.harnyx_api_key else "disabled")
     mcp = build_mcp(service)
     mcp_app = mcp.streamable_http_app(stateless_http=True, transport_security=_security(settings))
 
@@ -187,7 +222,7 @@ def create_app(settings: Settings | None = None, service=None) -> FastAPI:
     app = FastAPI(title=settings.service_name, lifespan=lifespan)
     app.state.settings = settings
     app.state.service = service
-    app.add_middleware(IdentityMiddleware, settings=settings)
+    app.add_middleware(IdentityMiddleware, settings=settings, service=service)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["https://wellspringwatersolutions-lab.github.io"],
@@ -268,7 +303,16 @@ def create_app(settings: Settings | None = None, service=None) -> FastAPI:
                 on_progress=on_progress,
             )
         except BillingError as exc:
-            return _error(request, exc.status, exc.code, exc.message, retry_after=exc.retry_after, upgrade_url=exc.upgrade_url)
+            return _error(
+                request,
+                exc.status,
+                exc.code,
+                exc.message,
+                retry_after=exc.retry_after,
+                upgrade_url=exc.upgrade_url,
+                remaining_usd=exc.remaining_usd,
+                reset_at=getattr(exc, "reset_at", None),
+            )
         except DraftError as exc:
             payload = exc.body()
             message = payload.get("error", {}).get("message") if isinstance(payload, dict) else "The draft answer could not be written."
@@ -358,6 +402,92 @@ def create_app(settings: Settings | None = None, service=None) -> FastAPI:
             return _error(request, 404, "not_found", "No job with that id.")
         return _stamp(request, found)
 
+    def _owner_only(request: Request):
+        if not getattr(current_identity(), "owner", False):
+            return _error(request, 401, "invalid_api_key", "The owner key is required.")
+        return None
+
+    @app.get("/accuracy", summary="Latest known-answer accuracy and the last 14 runs.")
+    def accuracy(request: Request):
+        """Public summary. It does not include claim text or keys."""
+        return _stamp(request, public_report(settings))
+
+    @app.get("/v1/proposals", summary="Rule-tuning suggestions for the owner.")
+    def proposals(request: Request):
+        """Suggestions only. The constitution is not edited."""
+        rejected = _owner_only(request)
+        if rejected is not None:
+            return rejected
+        return _stamp(request, {"proposals": build_proposals(settings)})
+
+    @app.post("/v1/admin/accuracy-run", summary="Run the 12 known-answer claims. Owner only.")
+    def accuracy_run(request: Request):
+        """Manual run only. Stops once the run costs more than $0.30. Nothing here is scheduled."""
+        rejected = _owner_only(request)
+        if rejected is not None:
+            return rejected
+        record = run_accuracy(service, settings)
+        return _stamp(request, record)
+
+    @app.post("/v1/keys/trial", summary="Issue a free trial key. No signup.")
+    def trial_key(request: Request):
+        """Three checks for this key. One key per IP per UTC day. The raw key is returned once and stored only as a hash."""
+        try:
+            raw, remaining = service.billing.trials.issue(resolve_client_ip(dict(request.headers), request.client.host if request.client else None))
+        except TrialError as exc:
+            return _error(request, exc.status, exc.code, exc.message)
+        return _stamp(request, {"api_key": raw, "checks_remaining": remaining})
+
+    @app.post("/v1/feedback", summary="Report a bad verdict.")
+    def feedback(body: FeedbackIn, request: Request):
+        """A key is normal. An anonymous caller is limited to a few reports an hour."""
+        try:
+            saved = record_feedback(
+                settings,
+                current_identity(),
+                request_id=body.request_id,
+                claim=body.claim,
+                suggested_verdict=body.suggested_verdict,
+                reason=body.reason,
+                source_url=body.source_url,
+            )
+        except FeedbackError as exc:
+            return _error(request, exc.status, exc.code, exc.message)
+        return _stamp(request, saved)
+
+    @app.get("/v1/tester/budget", summary="Remaining lifetime budget for the presented tester key.")
+    def tester_budget(request: Request):
+        """Auth is the tester key in Authorization: Bearer or X-API-Key. The key is not returned."""
+        identity = current_identity()
+        billing = getattr(service, "billing", None)
+        if not getattr(identity, "tester", False) or billing is None or not hasattr(billing, "tester_status"):
+            return _error(request, 401, "invalid_api_key", "A tester key is required.")
+        return _stamp(request, billing.tester_status(identity.tester_hash))
+
+    @app.get("/v1/jobs/{job_id}/events", summary="Stream claims as each one finishes.")
+    def job_events(job_id: str, request: Request):
+        """Server-sent events. Each finished claim is `event: claim`. The last event is `event: done`."""
+        if service.store.get_job(job_id) is None:
+            return _error(request, 404, "not_found", "No job with that id.")
+
+        def stream():
+            sent = 0
+            for _ in range(2400):
+                found = service.store.get_job(job_id)
+                if found is None:
+                    yield "event: error\ndata: {\"error\":\"not_found\"}\n\n"
+                    return
+                claims = found.get("claims") or []
+                while sent < len(claims):
+                    yield "event: claim\ndata: " + json.dumps(claims[sent]) + "\n\n"
+                    sent += 1
+                if found["status"] in {"done", "error"}:
+                    yield "event: done\ndata: " + json.dumps({"status": found["status"], "error": found.get("error")}) + "\n\n"
+                    return
+                time.sleep(0.05)
+
+        return StreamingResponse(stream(), media_type="text/event-stream")
+
     @app.get("/v1/verification/{verification_id}", response_model=PublicVerificationOut, responses={404: {"model": ErrorResponse}})
     def get_verification(verification_id: str, request: Request):
         found = service.get(verification_id)
@@ -384,18 +514,28 @@ def create_app(settings: Settings | None = None, service=None) -> FastAPI:
             title=settings.service_name,
             version="5",
             description=(
-                "Fact-checking for agents. Send a paid key as Authorization: Bearer or X-API-Key. "
-                "The first check is free. POST /v1/verify uses claims[].text. POST /check uses claims[].claim."
+                "Fact-checking for agents. Send a paid key, a tester key, or the owner key as "
+                "Authorization: Bearer or X-API-Key. The first check is free. "
+                "POST /v1/verify uses claims[].text. POST /check uses claims[].claim."
             ),
             routes=app.routes,
         )
         components = schema.setdefault("components", {})
         components["securitySchemes"] = {
-            "BearerAuth": {"type": "http", "scheme": "bearer", "description": "Authorization: Bearer <api key>"},
-            "ApiKeyAuth": {"type": "apiKey", "in": "header", "name": "X-API-Key"},
+            "BearerAuth": {
+                "type": "http",
+                "scheme": "bearer",
+                "description": "Authorization: Bearer <key>. The key may be a paid key, a tester key, or the owner key.",
+            },
+            "ApiKeyAuth": {
+                "type": "apiKey",
+                "in": "header",
+                "name": "X-API-Key",
+                "description": "Same key as Authorization: Bearer. Paid, tester, or owner. The raw key is never logged.",
+            },
         }
         for path, methods in schema.get("paths", {}).items():
-            if path not in {"/check", "/v1/verify", "/v1/jobs/{job_id}", "/v1/verification/{verification_id}"}:
+            if path not in {"/check", "/v1/verify", "/v1/jobs/{job_id}", "/v1/verification/{verification_id}", "/v1/tester/budget"}:
                 continue
             for operation in methods.values():
                 if isinstance(operation, dict):

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import secrets
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -121,6 +122,7 @@ def new_api_key(factory, *, credits: float, label: str = "") -> str:
 class Store:
     def __init__(self, factory):
         self.factory = factory
+        self._job_lock = threading.Lock()
 
     def save(self, payload: VerificationOut, *, fingerprint: str | None, tier: str, api_key_id: str | None) -> None:
         with self.factory() as session:
@@ -144,7 +146,7 @@ class Store:
             session.commit()
 
     def update_job(self, job_id: str, *, status: str | None = None, done: int | None = None, total: int | None = None, report: dict | None = None, error: str | None = None) -> None:
-        with self.factory() as session:
+        with self._job_lock, self.factory() as session:
             row = session.get(JobRow, job_id)
             if row is None:
                 return
@@ -161,16 +163,33 @@ class Store:
             row.updated_at = datetime.now(timezone.utc)
             session.commit()
 
+    def set_job_claims(self, job_id: str, claims: list[dict], *, done: int, total: int) -> None:
+        """Store claims that have finished. A finished job keeps its full report."""
+        with self._job_lock, self.factory() as session:
+            row = session.get(JobRow, job_id)
+            if row is None or row.status == "done":
+                return
+            row.status = "running"
+            row.progress_done = done
+            row.progress_total = total
+            row.report = {"claims": claims}
+            row.updated_at = datetime.now(timezone.utc)
+            session.commit()
+
     def get_job(self, job_id: str) -> dict | None:
         with self.factory() as session:
             row = session.get(JobRow, job_id)
             if row is None:
                 return None
+            raw = row.report if isinstance(row.report, dict) else None
+            claims = list((raw or {}).get("claims") or [])
+            report = raw if row.status == "done" else None
             return {
                 "job_id": row.id,
                 "status": row.status,
                 "progress": {"done": row.progress_done, "total": row.progress_total},
-                "report": row.report,
+                "claims": claims,
+                "report": report,
                 "error": row.error,
             }
 

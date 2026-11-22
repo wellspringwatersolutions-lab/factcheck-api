@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import logging
 import re
 import threading
@@ -14,6 +15,8 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 from factcheck.aggregate import RULES_VERSION, decide
+from factcheck.claim_cache import ClaimCache
+from factcheck.early import factcheck_short_circuit, search_is_enough
 from factcheck.categories import CATEGORIES, EFFORT_LIMITS, effort_for, is_math, normalize_claim
 from factcheck.checks import UrlChecker, apply_passage_checks, passage_check_rows
 from factcheck.cleanup import focus_query, is_bare_question, peel_leading_question, priority, split_dialogue, strip_labels
@@ -23,9 +26,11 @@ from factcheck.request_ctx import (
     add_phase,
     begin_request,
     bind_context,
+    cached_claims,
     current_request,
     drop_counts,
     end_request,
+    note_cached,
     phase_seconds,
     retrieval_calls,
     set_phase,
@@ -333,6 +338,8 @@ class VerificationService:
         synopsizer=None,
         reviewer=None,
         query_writer=None,
+        google_factcheck=None,
+        claim_cache=None,
     ):
         self.settings = settings
         self.extractor = extractor
@@ -351,6 +358,11 @@ class VerificationService:
         self.synopsizer = synopsizer
         self.reviewer = reviewer
         self.query_writer = query_writer
+        self.google_factcheck = google_factcheck
+        self.claim_cache = claim_cache or ClaimCache(
+            ttl=int(getattr(settings, "claim_cache_ttl_seconds", 7 * 24 * 3600)),
+            path=getattr(settings, "claim_cache_path", "") or "",
+        )
         self._draft_text = ""
         self._disconnect = None
         self._meter_lock = threading.Lock()
@@ -394,19 +406,31 @@ class VerificationService:
             if preclassified is None and not claims and (question or is_bare_question(text)):
                 mode = "question"
                 asked = (question or text or "").strip()
-                model_name, drafted, stance = self._draft(asked)
+                draft_wait = min(8.0, deadline - time.monotonic())
+                try:
+                    if draft_wait <= 0.2:
+                        raise TimeoutError("draft exceeded the request budget")
+                    model_name, drafted, stance = _call_with_timeout(self._draft, draft_wait, asked)
+                except TimeoutError:
+                    logger.warning("draft stopped for the request budget")
+                    warnings.append("draft_timeout")
+                    model_name, drafted, stance = "timeout", "", "not_enough_evidence"
                 draft_answer = DraftAnswer(model=model_name, text=drafted, stance=stance)
                 state.draft_text = drafted
                 check_text = drafted
                 check_claims = None
             state.question = asked or ""
+            self._google_found = {}
             t_extract = time.monotonic()
             if preclassified is not None:
                 extracted = [normalize_claim(item) for item in preclassified]
             else:
+                extract_wait = min(22.0, deadline - time.monotonic())
                 try:
+                    if extract_wait <= 0.2:
+                        raise TimeoutError("extraction exceeded the request budget")
                     extracted, warnings = _call_with_timeout(
-                        self.extractor.extract, 22.0, check_text, check_claims
+                        self.extractor.extract, extract_wait, check_text, check_claims
                     )
                 except Exception as exc:  # noqa: BLE001 - extraction must not consume the retrieval budget
                     snippet = (check_text or "")[:240]
@@ -416,9 +440,10 @@ class VerificationService:
                 extracted = [normalize_claim(item) for item in extracted]
                 if check_claims is None and (not extracted or any(item.startswith("extraction_fallback") for item in warnings)):
                     retried: list = []
-                    if getattr(self.extractor, "retry_keypoints", None):
+                    retry_wait = min(8.0, deadline - time.monotonic())
+                    if getattr(self.extractor, "retry_keypoints", None) and retry_wait > 0.5:
                         try:
-                            retried = _call_with_timeout(self.extractor.retry_keypoints, 8.0, check_text) or []
+                            retried = _call_with_timeout(self.extractor.retry_keypoints, retry_wait, check_text) or []
                         except Exception as exc:  # noqa: BLE001
                             logger.warning("extraction retry %s snippet=%r", exc.__class__.__name__, (check_text or "")[:240])
                             retried = []
@@ -431,7 +456,7 @@ class VerificationService:
                             warnings.append("extraction_fallback:TimeoutError")
             for item in extracted:
                 item.text = strip_labels(item.text)
-                item.text, _dropped = resolve_pronouns(item.text, check_text or "")
+                item.text, _dropped = resolve_pronouns(item.text, f"{asked or ''}\n{check_text or ''}")
             if mode == "question":
                 extracted = drop_invented_negative(extracted, asked)
                 have = {" ".join(item.text.lower().split()) for item in extracted}
@@ -454,15 +479,14 @@ class VerificationService:
             elif check_claims is None and preclassified is None:
                 extracted = select_key_points(extracted, 6)
             set_phase("extract", time.monotonic() - t_extract)
-            # Retrieval keeps 25s and the two-pass review keeps 16s on a real request.
-            # A shorter budget, including a zero budget, is left alone so the request can stop.
-            if budget >= 41 and deadline - time.monotonic() < 41:
-                deadline = time.monotonic() + 41
-                state.deadline = deadline
+            # The original deadline is a hard stop. Nothing below may push it later.
+            state.deadline = deadline
             if len(extracted) > self.settings.max_output_claims:
                 extracted = extracted[: self.settings.max_output_claims]
                 warnings.append("claim_limit")
-            outputs = self._run(extracted, meter, warnings, deadline - 16)
+            remaining = deadline - time.monotonic()
+            retrieve_until = deadline - 8 if remaining > 16 else deadline
+            outputs = self._run(extracted, meter, warnings, retrieve_until)
             meter.retrieval_calls = retrieval_calls()
             _share_factchecks(outputs)
             payload = self._assemble(
@@ -478,11 +502,8 @@ class VerificationService:
                 question=asked,
                 deadline=deadline,
             )
-            if deadline - time.monotonic() < 12:
-                deadline = time.monotonic() + 12
-                state.deadline = deadline
             t_review = time.monotonic()
-            if self.reviewer is not None:
+            if self.reviewer is not None and deadline - time.monotonic() > 1:
                 self.reviewer.meter = meter
                 from factcheck.review import run_review
 
@@ -502,7 +523,13 @@ class VerificationService:
             from factcheck.reconcile import reconcile_answer
 
             reconcile_answer(payload)
-            if payload.usage.tier == "owner":
+            if getattr(client, "agent_name", ""):
+                payload.usage.caller = client.agent_name
+                logger.info("verification %s caller=%s hash=%s", payload.verification_id, client.agent_name, (client.agent_hash or "")[:8])
+            elif getattr(client, "tester", False):
+                payload.usage.caller = "tester"
+                logger.info("verification %s caller=tester hash=%s", payload.verification_id, (client.tester_hash or "")[:8])
+            elif payload.usage.tier == "owner":
                 logger.info("verification %s tier=owner ip=%s", payload.verification_id, getattr(client, "ip", ""))
             self.store.save(payload, fingerprint=getattr(client, "fingerprint", None), tier=payload.usage.tier, api_key_id=getattr(reservation, "api_key_id", None))
             if charge:
@@ -510,6 +537,10 @@ class VerificationService:
                     self.billing.release(reservation)
                 else:
                     self.billing.complete(reservation, payload.usage.estimated_cost_usd, payload.verification_id)
+            if getattr(client, "agent_name", "") and hasattr(self.billing, "agent_status"):
+                payload.usage.budget_remaining_usd = self.billing.agent_status(client.agent_hash).get("remaining_usd")
+            elif getattr(client, "tester", False) and hasattr(self.billing, "tester_status"):
+                payload.usage.tester_budget_remaining_usd = self.billing.tester_status(client.tester_hash).get("remaining_usd")
             return payload
         except Exception:
             if reservation is not None:
@@ -541,6 +572,57 @@ class VerificationService:
             needs_human_review=False,
             checked_at=datetime.now(timezone.utc).isoformat(),
         )
+
+    def _call_search(self, **kwargs):
+        fn = self.retriever.search
+        try:
+            accepted = inspect.signature(fn).parameters
+        except (TypeError, ValueError):
+            accepted = {}
+        if accepted and "stop_when" not in accepted and not any(
+            item.kind is inspect.Parameter.VAR_KEYWORD for item in accepted.values()
+        ):
+            kwargs.pop("stop_when", None)
+        return fn(**kwargs)
+
+    def _collect_hits(self, claim, *, limit: int, scientific: bool, categories: list[str]):
+        queries = self._search_queries(claim.text)[:2] or [focus_query(claim.text)]
+        window = news_window(claim.text)
+        found = []
+        google = getattr(self, "google_factcheck", None)
+        if google is not None:
+            try:
+                google_hits = list(google.search(queries[0], limit=4) or [])
+            except Exception as exc:  # noqa: BLE001 - a fact-check outage must not skip the web search
+                logger.warning("google fact-check failed %s", exc.__class__.__name__)
+                google_hits = []
+            if google_hits:
+                self._google_found[claim.text] = True
+                found.extend(google_hits)
+            if factcheck_short_circuit(claim.text, found):
+                logger.warning("fact-check short-circuit claim=%r", claim.text[:160])
+                return claim, queries, found, window
+
+        def stop(hits) -> bool:
+            return search_is_enough(claim.text, list(hits) + found)
+
+        batch = self._call_search(
+            query=queries[0],
+            limit=min(limit, 10),
+            scientific=scientific,
+            categories=categories,
+            extra_queries=queries[1:2],
+            window=window,
+            broad=True,
+            budget=current_request(),
+            stop_when=stop,
+        )
+        found.extend(list(batch or []))
+        if not search_is_enough(claim.text, found):
+            found.extend(self._dated_wikipedia(claim.text))
+        else:
+            logger.warning("early stop claim=%r", claim.text[:160])
+        return claim, queries, found, window
 
     def _dated_wikipedia(self, text: str) -> list:
         query = wikipedia_event_query(text)
@@ -612,6 +694,17 @@ class VerificationService:
                 extracted[index],
                 "Not checked in this request. The check focused on the highest-stakes claims.",
             )
+        fresh = []
+        for index in selected:
+            stored = self.claim_cache.get(extracted[index].text)
+            if stored is None:
+                fresh.append(index)
+                continue
+            results[index] = stored
+        if len(fresh) != len(selected):
+            note_cached(len(selected) - len(fresh))
+        selected = fresh
+        self._emit_progress(results)
         jobs = self._jobs(extracted, selected, results, meter, warnings, deadline)
         workers = max(1, int(getattr(self.settings, "check_concurrency", 4)))
         with ThreadPoolExecutor(max_workers=workers) as pool:
@@ -633,10 +726,64 @@ class VerificationService:
                     else "Not checked: the time budget ran out before this claim was retrieved."
                 )
                 results[index] = self._not_checked(claim, reason)
-        callback = current_request().on_progress if current_request() is not None else None
-        if callback is not None:
-            callback(sum(1 for item in results if item is not None), len(results))
+        self._factcheck_fallback(extracted, results)
+        self._emit_progress(results)
         return [item for item in results if item is not None]
+
+    def _factchecker_search(self):
+        direct = getattr(self.retriever, "search_fact_checkers", None)
+        if direct is not None:
+            return direct
+        for provider in getattr(self.retriever, "providers", []) or []:
+            found = getattr(provider, "search_fact_checkers", None)
+            if found is not None:
+                return found
+        return None
+
+    def _factcheck_fallback(self, extracted, results) -> None:
+        """One fact-checker query when Google returned nothing and the claim is still open."""
+        search = self._factchecker_search()
+        if search is None:
+            return
+        found_google = getattr(self, "_google_found", {})
+        for index, claim in enumerate(extracted):
+            current = results[index]
+            if current is None or found_google.get(claim.text):
+                continue
+            open_claim = current.claim_type == "opinion" or current.verdict in {"Unverified", "Conflicting", "Unsupported"}
+            if not open_claim:
+                continue
+            try:
+                hits = list(search(claim.text) or [])
+            except Exception as exc:  # noqa: BLE001 - the fallback is optional
+                logger.warning("fact-checker fallback failed %s", exc.__class__.__name__)
+                continue
+            if not hits or current.claim_type == "opinion":
+                continue
+            window = news_window(claim.text)
+            kept, _reasons = screen_hits(claim.text, hits, window, context=(current_request().question if current_request() else ""))
+            if not kept:
+                continue
+            for hit in kept:
+                annotate(hit, time_sensitive=claim.time_sensitive, stale_after_days=self.settings.stale_after_days)
+            decision = decide(
+                kept,
+                category=claim.claim_category,
+                hypothesis=claim.hypothesis,
+                high_stakes=claim.claim_category in {"T4", "T7"} or claim.time_sensitive,
+                claim_text=claim.text,
+            )
+            if decision.verdict not in {"Supported", "likely_true", "Contradicted"}:
+                continue
+            results[index] = self._claim_out(claim, current.effort or "standard", decision, kept, None, [], passage_check_rows(claim.text, kept))
+
+    def _emit_progress(self, results: list) -> None:
+        state = current_request()
+        callback = state.on_progress if state is not None else None
+        if callback is None:
+            return
+        finished = [item for item in results if item is not None]
+        callback(len(finished), len(results), finished)
 
     def _jobs(self, extracted, selected, results, meter, warnings, deadline):
         indexes = list(selected)
@@ -719,22 +866,24 @@ class VerificationService:
         t_retrieve = time.monotonic()
         hits = []
         seen_urls: set[str] = set()
-        for claim in claims:
-            queries = self._search_queries(claim.text)[:2]
-            window = news_window(claim.text)
-            found = list(
-                self.retriever.search(
-                    queries[0],
-                    limit=min(limit, 10),
-                    scientific=scientific,
-                    categories=categories,
-                    extra_queries=queries[1:2],
-                    window=window,
-                    broad=True,
-                    budget=current_request(),
-                )
-            )
-            found.extend(self._dated_wikipedia(claim.text))
+        gathered: list[tuple] = []
+        workers = max(1, min(8, len(claims)))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {
+                pool.submit(
+                    bind_context(
+                        self._collect_hits,
+                        claim,
+                        limit=limit,
+                        scientific=scientific,
+                        categories=categories,
+                    )
+                ): claim
+                for claim in claims
+            }
+            for future in as_completed(futures):
+                gathered.append(future.result())
+        for claim, queries, found, window in gathered:
             kept, reasons = screen_hits(claim.text, found, window, context=(current_request().question if current_request() else ""))
             logger.warning(
                 "retrieval claim=%r queries=%s returned=%d kept=%d drops=%s",
@@ -803,7 +952,12 @@ class VerificationService:
                 decision.needs_human_review = True
             if tool and tool.get("matches") is False:
                 decision.needs_human_review = True
-            results[indexes[offset]] = self._claim_out(claim, effort, decision, chosen, tool, votes, checks)
+            finished = self._claim_out(claim, effort, decision, chosen, tool, votes, checks)
+            if finished.effort != "skipped":
+                ttl = self.settings.cache_ttl_time_sensitive_seconds if claim.time_sensitive else self.claim_cache.ttl
+                self.claim_cache.put(finished, ttl=ttl)
+            results[indexes[offset]] = finished
+            self._emit_progress(results)
 
     def _label_concurrent(self, claim: ExtractedClaim, passages: list[Evidence]):
         rank_a = bind_context(self.ranker_a.rank, [claim], passages)
@@ -921,7 +1075,16 @@ class VerificationService:
         tier = "eval"
         credits = 0.0
         if charge:
-            if getattr(client, "owner", False):
+            if getattr(client, "trial", False):
+                tier = "trial"
+                credits = 0.0
+            elif getattr(client, "agent_name", ""):
+                tier = "agent"
+                credits = 0.0
+            elif getattr(client, "tester", False):
+                tier = "tester"
+                credits = 0.0
+            elif getattr(client, "owner", False):
                 tier = "owner"
                 credits = 0.0
             elif getattr(client, "api_key", None):
@@ -959,6 +1122,7 @@ class VerificationService:
                 estimated_cost_usd=round(meter.estimated_cost_usd, 6),
                 retriever_cost_usd=round(meter.retriever_cost_usd, 6),
                 retrieval_calls=int(getattr(meter, "retrieval_calls", 0)),
+                cached_claims=cached_claims(),
                 drops=drop_counts(),
                 credits_charged=credits,
                 tier=tier,

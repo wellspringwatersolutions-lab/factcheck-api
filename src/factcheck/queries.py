@@ -223,7 +223,7 @@ class QueryWriter:
         self.client = client
         self.settings = settings
         self.meter = meter
-        self.primary = settings.judge_b_model
+        self.primary = (getattr(settings, "fast_model", "") or "").strip() or settings.judge_b_model
         self.fallback = settings.judge_a_model
 
     def write(self, text: str) -> list[str]:

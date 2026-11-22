@@ -11,6 +11,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import Field
 
 from factcheck.billing import BillingError, ClientIdentity
+from factcheck.feedback import FeedbackError, record_feedback
 from factcheck.questions import DraftError
 from factcheck.branding import SERVICE_NAME
 from factcheck.schemas import DISCLAIMER
@@ -53,7 +54,7 @@ def build_mcp(service) -> MCPServer:
         "Opinions return what mainstream fact-checkers say, which is not a true or false label. "
         "Hypotheses are not called true or false. "
         f"{DISCLAIMER} "
-        "The first check from a client is free. Send a paid key as Authorization: Bearer <key> or X-API-Key. "
+        "The first check from a client is free. Send a paid key, a tester key, or the owner key as Authorization: Bearer <key> or X-API-Key. "
         "verify_text and verify_claims block until the check finishes. "
         "start_check returns a job_id immediately, and get_job polls status, progress, and the report. "
         "An async job is allowed 120 seconds."
@@ -128,6 +129,39 @@ def build_mcp(service) -> MCPServer:
         if found is None:
             raise ToolError(json.dumps({"error": {"code": "not_found", "message": "No job with that id."}}))
         return json.dumps(found, ensure_ascii=False)
+
+    @mcp.tool(
+        description=(
+            "Report a bad verdict. suggested_verdict is one of supported, hypothesis, opinion, "
+            "conflicting, unverified. Send request_id, claim, and reason. source_url is optional. "
+            "Does not change the constitution. Uses the same key as the check, or a tight anonymous limit."
+        )
+    )
+    async def report_bad_verdict(
+        request_id: Annotated[str, Field(description="request_id from the check", min_length=1)],
+        claim: Annotated[str, Field(description="Claim wording that was judged badly", min_length=1)],
+        suggested_verdict: Annotated[str, Field(description="One of the five public verdicts")],
+        reason: Annotated[str, Field(description="Why the verdict is wrong", min_length=1)],
+        source_url: Annotated[str, Field(description="Optional http(s) source")] = "",
+    ) -> str:
+        identity = current_identity()
+
+        def run():
+            return record_feedback(
+                service.settings,
+                identity,
+                request_id=request_id,
+                claim=claim,
+                suggested_verdict=suggested_verdict,
+                reason=reason,
+                source_url=source_url,
+            )
+
+        try:
+            saved = await anyio.to_thread.run_sync(run)
+        except FeedbackError as exc:
+            raise ToolError(json.dumps(exc.body())) from exc
+        return json.dumps(saved, ensure_ascii=False)
 
     @mcp.tool(description="Fetch a stored verification by id. Does not spend a free check or credits.")
     async def get_verification(

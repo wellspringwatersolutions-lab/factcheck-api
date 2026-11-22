@@ -21,6 +21,7 @@ class RequestState:
     question: str = ""
     on_progress: object | None = None
     retrieval_calls: int = 0
+    cached_claims: int = 0
     drops: dict[str, int] = field(default_factory=dict)
     lock: threading.Lock = field(default_factory=threading.Lock)
 
@@ -100,6 +101,22 @@ def note_retrieval(count: int = 1) -> None:
         return
     with state.lock:
         state.retrieval_calls += count
+
+
+def note_cached(count: int = 1) -> None:
+    state = _CURRENT.get()
+    if state is None or count <= 0:
+        return
+    with state.lock:
+        state.cached_claims += count
+
+
+def cached_claims() -> int:
+    state = _CURRENT.get()
+    if state is None:
+        return 0
+    with state.lock:
+        return state.cached_claims
 
 
 def retrieval_calls() -> int:

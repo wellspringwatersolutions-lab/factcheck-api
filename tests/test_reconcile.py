@@ -45,7 +45,7 @@ def test_john_adams_no_matches_the_bottom_line():
         "was John Adams a criminal",
         "No. He was never charged or convicted of a crime.",
         "no",
-        [_claim("He was never charged or convicted of a crime.")],
+        [_claim("He was never charged or convicted of a crime.", "Supported")],
     )
     assert result.synopsis.answer == "no"
     assert result.synopsis.rating != "Not enough evidence"
@@ -53,6 +53,25 @@ def test_john_adams_no_matches_the_bottom_line():
     assert result.draft_answer.stance == "no"
     assert result.draft_answer.text.lower().startswith("no")
     assert "not enough evidence" not in result.synopsis.tldr.lower()
+
+
+def test_a_no_with_nothing_decided_is_not_enough_evidence():
+    result = _report(
+        "was John Adams a criminal",
+        "No. He was never charged or convicted of a crime.",
+        "no",
+        [
+            _claim("He was never charged or convicted of a crime.", "Unverified"),
+            _claim("He was a Founding Father.", "Unverified"),
+        ],
+    )
+    result.claims[0].effort = "skipped"
+    result.claims[1].effort = "skipped"
+    reconcile_answer(result)
+    assert result.synopsis.rating == "Not enough evidence"
+    assert result.synopsis.answer == "not_enough_evidence"
+    assert result.draft_answer.stance == "not_enough_evidence"
+    assert any("thin" in item.lower() for item in result.synopsis.caveats)
 
 
 def test_george_washington_no_keeps_the_treason_caveat():
@@ -81,11 +100,10 @@ def test_checked_pipeline_keeps_adams_and_washington_consistent():
         "no",
     )
     adams = service.verify(text="was John Adams a criminal", claims=None, client=client(), charge=False)
-    assert adams.synopsis.answer == "no"
-    assert adams.synopsis.rating != "Not enough evidence"
-    assert adams.synopsis.tldr.lower().startswith("no")
-    assert adams.draft_answer.text.lower().startswith("no")
-    assert adams.draft_answer.stance == "no"
+    assert adams.synopsis.answer == "not_enough_evidence"
+    assert adams.synopsis.rating == "Not enough evidence"
+    assert adams.draft_answer.stance == "not_enough_evidence"
+    assert any("thin" in item.lower() for item in adams.synopsis.caveats)
 
     service.drafter = lambda question: (
         "mock-draft",
@@ -98,8 +116,7 @@ def test_checked_pipeline_keeps_adams_and_washington_consistent():
         client=client(fingerprint="gw-answer"),
         charge=False,
     )
-    assert washington.synopsis.answer == "no"
-    assert washington.synopsis.rating == "Mostly accurate"
-    assert washington.synopsis.tldr.lower().startswith("no")
-    assert "treason" in washington.synopsis.tldr.lower()
-    assert washington.draft_answer.stance == "no"
+    assert washington.synopsis.answer == "not_enough_evidence"
+    assert washington.synopsis.rating == "Not enough evidence"
+    assert washington.draft_answer.stance == "not_enough_evidence"
+    assert any("thin" in item.lower() for item in washington.synopsis.caveats)

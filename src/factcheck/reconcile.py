@@ -8,22 +8,11 @@ from factcheck.questions import parse_stance, stance_of_text
 from factcheck.schemas import VerificationOut
 
 _YESNO = re.compile(r"^(was|is|did|were|has|have|do|does|had|are)\b", re.I)
-_GUILT = re.compile(r"\b(convicted|was charged|found guilty|pleaded guilty|pled guilty)\b", re.I)
 _CAVEAT = re.compile(r"\b(but|however|although|technically)\b", re.I)
 
 
 def _checked(claim) -> bool:
     return claim.claim_type == "fact" and claim.verdict != "Hypothesis" and claim.effort != "skipped"
-
-
-def _rating_for(answer: str, caveats: list[str], supported: list) -> str:
-    if answer == "not_enough_evidence":
-        return "Not enough evidence"
-    if answer == "partly":
-        return "Mixed"
-    if caveats or not supported:
-        return "Mostly accurate"
-    return "Accurate"
 
 
 def answer_for_rating(rating: str) -> str:
@@ -120,9 +109,6 @@ def reconcile_answer(result: VerificationOut) -> None:
     conflicting = [claim for claim in facts if claim.verdict == "Conflicting"]
     supported = [claim for claim in facts if claim.verdict == "Supported"]
     likely = [claim for claim in facts if claim.verdict == "likely_true"]
-    record = " ".join((source.quote or source.snippet or "") for claim in facts for source in claim.sources)
-    criminal = bool(_YESNO.match(question.strip())) and bool(re.search(r"\bcriminal\b", question, re.I))
-    guilt_in_record = bool(_GUILT.search(record))
     correction = ""
     if conflicting or (supported and contradicted):
         answer = "not_enough_evidence"
@@ -135,9 +121,11 @@ def reconcile_answer(result: VerificationOut) -> None:
             answer = "yes"
         else:
             answer = "partly"
-    elif stance in {"yes", "no", "partly"} and (supported or likely or (criminal and stance == "no" and not guilt_in_record)):
+    elif stance in {"yes", "no", "partly"} and (supported or likely):
         answer = stance
     else:
+        answer = "not_enough_evidence"
+    if not supported and not likely and not contradicted and not conflicting:
         answer = "not_enough_evidence"
     caveats = [claim.text for claim in supported if _CAVEAT.search(claim.text)]
     if not caveats and answer in {"yes", "no"} and _CAVEAT.search(draft.text or ""):
@@ -149,7 +137,12 @@ def reconcile_answer(result: VerificationOut) -> None:
     for item in result.synopsis.caveats:
         if item not in caveats:
             caveats.append(item)
-    rating = _rating_for(answer, caveats if answer in {"yes", "no"} else [], supported)
+    from factcheck.synopsis import rate_claims
+
+    rating, _, _ = rate_claims(result.claims)
+    if not supported and not likely and not contradicted and not conflicting:
+        answer = "not_enough_evidence"
+        rating = "Not enough evidence"
     tldr = _tldr(answer, draft.text, caveats, correction)
     if answer == "not_enough_evidence":
         note = "The evidence for this answer is thin."

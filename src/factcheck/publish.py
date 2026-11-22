@@ -68,6 +68,23 @@ def _public_name(value: str | None) -> str:
     return verdict
 
 
+def confidence_and_action(verdict: str | None, claim_type: str | None, confidence: float | None) -> tuple[float, str]:
+    """A score from 0 to 1 and whether an agent should state the claim."""
+    try:
+        score = float(confidence or 0)
+    except (TypeError, ValueError):
+        score = 0.0
+    score = max(0.0, min(1.0, score))
+    public, _detail, _label = map_verdict(verdict, claim_type)
+    if public == "supported" and score >= 0.6:
+        action = "safe_to_state"
+    elif public in {"supported", "hypothesis"}:
+        action = "state_with_caveat"
+    else:
+        action = "do_not_state"
+    return score, action
+
+
 def publish_verification(result: VerificationOut) -> dict:
     """JSON a client may see. Claim verdicts are only the five public names."""
     data = result.model_dump(mode="json", by_alias=True)
@@ -76,6 +93,9 @@ def publish_verification(result: VerificationOut) -> dict:
         claim["verdict"] = verdict
         claim["verdict_detail"] = detail
         claim["verdict_label"] = label
+        score, action = confidence_and_action(verdict, claim.get("claim_type"), claim.get("confidence"))
+        claim["confidence"] = score
+        claim["recommended_action"] = action
     review = data.get("review") or {}
     for change in review.get("changes") or []:
         change["from"] = _public_name(change.get("from"))

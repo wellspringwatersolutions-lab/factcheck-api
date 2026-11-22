@@ -10,6 +10,7 @@ import httpx
 
 logger = logging.getLogger("factcheck")
 
+from factcheck.parallel import SEARCH_SLOTS, parallel_map
 from factcheck.request_ctx import CLAIM_CALL_CAP, bind_context, note_cost, reserve_retrieval
 from factcheck.types import Evidence
 
@@ -152,35 +153,89 @@ class DesearchRetriever:
             )
         return [hit for hit in hits if hit.url]
 
-    def search_web_and_news(self, queries: list[str], *, limit: int = 10, window: dict | None = None, budget=None) -> list[Evidence]:
-        """A dated claim uses POST /search. Anything else uses GET /web. Never both, never GET /news."""
-        hits: list[Evidence] = []
-        seen: set[str] = set()
-        made = 0
-        for query in queries:
-            if made >= CLAIM_CALL_CAP:
-                logger.warning("desearch claim cap %s", CLAIM_CALL_CAP)
-                break
-            cleaned = " ".join((query or "").split())
-            if not cleaned:
-                continue
+    def _one_query(self, query: str, limit: int, window: dict | None, budget) -> list[Evidence]:
+        """One Desearch call. The shared slot cap is about 8 in flight across claims."""
+        with SEARCH_SLOTS:
             try:
                 if window:
-                    batch = self._post_search(cleaned, min(limit, 10), window, budget)
-                else:
-                    batch = self._rows("/web", cleaned, min(limit, 10), None, budget)
+                    return self._post_search(query, min(limit, 10), window, budget)
+                return self._rows("/web", query, min(limit, 10), None, budget)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("desearch query failed: %s", exc.__class__.__name__)
-                continue
-            made += 1
-            logger.warning("desearch query=%r returned=%d dated=%s", cleaned, len(batch), bool(window))
+                return []
+
+    def search_web_and_news(
+        self,
+        queries: list[str],
+        *,
+        limit: int = 10,
+        window: dict | None = None,
+        budget=None,
+        stop_when=None,
+    ) -> list[Evidence]:
+        """A dated claim uses POST /search. Anything else uses GET /web. Never both, never GET /news.
+
+        The first query runs alone. If it already settles the claim, the rest are not sent.
+        Otherwise the remaining queries run together.
+        """
+        cleaned = []
+        for query in queries:
+            text = " ".join((query or "").split())
+            if text and text not in cleaned:
+                cleaned.append(text)
+        hits: list[Evidence] = []
+        seen: set[str] = set()
+
+        def absorb(query: str, batch: list[Evidence]) -> None:
+            logger.warning("desearch query=%r returned=%d dated=%s", query, len(batch), bool(window))
             for hit in batch:
                 key = hit.url.split("#")[0].rstrip("/")
-                if key in seen:
+                if not key or key in seen:
                     continue
                 seen.add(key)
                 hits.append(hit)
+
+        def settled() -> bool:
+            if stop_when is None:
+                return False
+            try:
+                return bool(stop_when(list(hits)))
+            except Exception as exc:  # noqa: BLE001 - a stop check must not drop the hits we have
+                logger.warning("desearch early stop check failed %s", exc.__class__.__name__)
+                return False
+
+        if not cleaned:
+            return []
+        if CLAIM_CALL_CAP <= 0:
+            return []
+        absorb(cleaned[0], self._one_query(cleaned[0], limit, window, budget))
+        if settled():
+            logger.warning("desearch early stop after 1 query")
+            return hits[:10]
+        rest = cleaned[1:CLAIM_CALL_CAP]
+        if rest:
+            batches = parallel_map(
+                [lambda query=query: self._one_query(query, limit, window, budget) for query in rest],
+                limit=8,
+            )
+            for query, batch in zip(rest, batches):
+                absorb(query, batch or [])
+                if settled():
+                    logger.warning("desearch early stop after query=%r", query)
+                    break
         return hits[:10]
+
+    def search_fact_checkers(self, claim: str) -> list[Evidence]:
+        """One web query limited to the four fact-checker hosts. Counts toward the 60-call cap."""
+        from factcheck.cleanup import focus_query
+
+        focus = focus_query(claim) or " ".join((claim or "").split())
+        query = (
+            f"{focus} site:snopes.com OR site:politifact.com OR site:factcheck.org "
+            "OR site:apnews.com ap-fact-check"
+        )
+        logger.warning("fact-checker fallback query=%r", query[:180])
+        return self._one_query(" ".join(query.split()), 5, None, self._budget)
 
     def extract(self, url: str) -> str:
         response = self.client.get(
@@ -267,12 +322,17 @@ class CompositeRetriever:
         window: dict | None = None,
         broad: bool = False,
         budget=None,
+        stop_when=None,
     ) -> list[Evidence]:
         jobs = []
         for provider in self.providers:
             if broad and hasattr(provider, "search_web_and_news"):
                 queries = [query, *(extra_queries or [])]
-                jobs.append(lambda provider=provider, queries=queries: provider.search_web_and_news(queries, limit=limit, window=window, budget=budget))
+                jobs.append(
+                    lambda provider=provider, queries=queries: provider.search_web_and_news(
+                        queries, limit=limit, window=window, budget=budget, stop_when=stop_when
+                    )
+                )
             else:
                 jobs.append(lambda provider=provider: provider.search(query, limit=limit))
         if self.scholarly and (scientific or set(categories or []) & {"T2", "T3", "T4"}):
@@ -325,7 +385,16 @@ class CompositeRetriever:
                 if found and not evidence.published_at:
                     evidence.published_at = found.group(1)
                 return text[:4000]
-        return ""
+        # Desearch missed the page. Harnyx is the next reader. Firecrawl is not wired.
+        reader = getattr(self, "harnyx", None)
+        if reader is None:
+            return ""
+        try:
+            text = reader.read(evidence.url)
+        except Exception as exc:  # noqa: BLE001 - a reader outage leaves the snippet in place
+            logger.warning("harnyx read failed %s", exc.__class__.__name__)
+            return ""
+        return (text or "")[:4000]
 
 
 class CorpusRetriever:

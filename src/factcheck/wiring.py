@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from factcheck.billing import BillingGate
+from factcheck.harnyx import HarnyxReader
 from factcheck.checks import UrlChecker
 from factcheck.config import Settings
 from factcheck.extract import HeuristicExtractor, LiveExtractor
@@ -22,6 +23,7 @@ from factcheck.review import TwoPassReview
 from factcheck.references import ClaimBuster, ReferenceBundle
 from factcheck.synopsis import LLMSynopsis
 from factcheck.scholarly import ScholarlyBundle
+from factcheck.claim_cache import ClaimCache
 from factcheck.storage import Store, build_cache, init_db, make_engine, make_session_factory
 from factcheck.types import UsageMeter
 
@@ -103,6 +105,8 @@ def build_service(settings: Settings):
     )
     claimbuster = ClaimBuster(settings.claimbuster_api_key) if settings.claimbuster_api_key else None
     retriever = CompositeRetriever(providers, scholarly=scholarly, references=references)
+    if settings.harnyx_api_key:
+        retriever.harnyx = HarnyxReader(settings.harnyx_api_key)
 
     def google_search(query: str):
         if google is None:
@@ -139,4 +143,9 @@ def build_service(settings: Settings):
         synopsizer=synopsizer,
         reviewer=reviewer,
         query_writer=query_writer,
+        google_factcheck=google,
+        claim_cache=ClaimCache(
+            ttl=int(getattr(settings, "claim_cache_ttl_seconds", 7 * 24 * 3600)),
+            path=getattr(settings, "claim_cache_path", "") or "",
+        ),
     )

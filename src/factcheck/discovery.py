@@ -19,11 +19,15 @@ Public claim verdicts are lowercase and only these five, in this order: supporte
 
 {DISCLAIMER}
 
-The rules are published at {root}/constitution (markdown, or JSON with `Accept: application/json`).
+The rules are published at {root}/constitution (markdown, or JSON with `Accept: application/json`). `GET /accuracy` publishes the latest known-answer run: date, accuracy, per-label confusion, cost, and the last 14 runs. Failures and feedback become suggestions at `GET /v1/proposals` for the owner. Nothing in that file edits the constitution.
 
 ## Auth
 
-The first check from a client is free and needs no key. Send a paid key as `Authorization: Bearer <key>` or `X-API-Key: <key>`. Do not put the key in the URL.
+The first check from a client is free and needs no key. Send a paid key, a tester key, or the owner key as `Authorization: Bearer <key>` or `X-API-Key: <key>`. The same headers work on the MCP endpoint. Do not put the key in the URL.
+
+A tester key is the sha256 listed in `TESTER_KEY_SHA256S` (unlimited) or `TESTER_KEY_BUDGETS` (`sha256hex:usd`, a lifetime budget; this wins when a hash is in both). Spend is Chutes plus Desearch cost, saved under `DATA_DIR` when that directory is writable, and `TESTER_KEY_SPENT` (`hashprefix8:usd`) is a floor after a redeploy. A check is rejected with HTTP 402 and `tester budget exhausted` when the remaining budget is below the reserve or already used up. The response includes `usage.caller` = `tester` and `usage.tester_budget_remaining_usd`. `GET /v1/tester/budget` returns the same budget. Tester spend still counts toward the daily spend cap. Logs record `caller=tester` and the first 8 characters of the hash, never the key.
+
+`AGENT_KEY_DAILY` is `name:sha256hex:usd_per_day`. It is empty unless an operator sets it; no bot keys are built in. An agent key skips the free-check limit, resets at UTC midnight, and is rejected with HTTP 402 `agent daily budget exhausted` plus `reset_at` when the day's budget is used up. Responses set `usage.caller` to the agent name and `usage.budget_remaining_usd`. Agent spend is saved next to tester spend and still counts toward the daily spend cap.
 
 ## Time limits
 
@@ -33,6 +37,10 @@ A normal check aims to finish within 45 seconds. Text longer than 3,500 characte
 
 {install}
 
+Claude Desktop: add a streamable HTTP server at `{root}/mcp`. Cursor: add `{root}/mcp` to Cursor. Generic streamable HTTP: `POST {root}/mcp`.
+
+`POST {root}/v1/keys/trial` issues one free trial key with no signup: 3 checks for that key, one key per IP per UTC day. The key is stored only as a hash. It works as `Authorization: Bearer` or `X-API-Key` on REST and MCP.
+
 ## Tools
 
 - verify_text: blocking check of a passage
@@ -40,17 +48,21 @@ A normal check aims to finish within 45 seconds. Text longer than 3,500 characte
 - start_check: start a check and return job_id without waiting
 - get_job: poll status, progress, and the report for that job_id
 - get_verification: fetch a stored result by id
+- report_bad_verdict: report a wrong verdict. Does not edit the constitution.
 
 ## HTTP
 
 POST {root}/v1/verify
 POST {root}/check
 GET {root}/v1/jobs/{{job_id}}
+GET {root}/v1/jobs/{{job_id}}/events
 GET {root}/v1/verification/{{id}}
 GET {root}/v1/verification/{{id}}/report
+POST {root}/v1/feedback
 GET {root}/constitution
+GET {root}/accuracy
 
-Both POST bodies accept `text`, `claims`, and `question`. `POST /check` with `"async": true`, or the header `Prefer: respond-async`, returns `202` `{{"job_id", "status": "queued"}}`. Poll `GET /v1/jobs/{{job_id}}` for `status` (`queued`, `running`, `done`, `error`), `progress` (`done`, `total`), and `report` when done.
+Both POST bodies accept `text`, `claims`, and `question`. `POST /check` with `"async": true`, or the header `Prefer: respond-async`, returns `202` `{{"job_id", "status": "queued"}}`. Poll `GET /v1/jobs/{{job_id}}` for `status` (`queued`, `running`, `done`, `error`), `progress` (`done`, `total`), `claims` as each one finishes, and `report` when done. `GET /v1/jobs/{{job_id}}/events` streams those claims as server-sent events (`event: claim`, then `event: done`). `usage.cached_claims` counts verdicts reused from the claim cache.
 
 `POST /v1/verify` and `POST /check` return different claim shapes. Do not mix them up.
 
@@ -74,7 +86,19 @@ def manifest(base_url: str) -> dict:
         ),
         "mcp_endpoint": f"{root}/mcp",
         "install": f"add {root}/mcp to Claude/Cursor",
-        "tools": ["verify_text", "verify_claims", "start_check", "get_job", "get_verification"],
+        "connect": {
+            "claude_desktop": f"Add a streamable HTTP server at {root}/mcp in Claude Desktop.",
+            "cursor": f"add {root}/mcp to Cursor",
+            "streamable_http": f"POST {root}/mcp",
+        },
+        "tools": [
+            {"name": "verify_text", "description": "Check a passage and return claims with verdict, confidence, and recommended_action."},
+            {"name": "verify_claims", "description": "Check a list of claims."},
+            {"name": "start_check", "description": "Start a check and return a job id."},
+            {"name": "get_job", "description": "Poll a job for progress, claims, and the report."},
+            {"name": "get_verification", "description": "Fetch a stored verification by id."},
+            {"name": "report_bad_verdict", "description": "Report a wrong verdict. Does not edit the constitution."},
+        ],
         "docs": f"{root}/llms.txt",
         "constitution": f"{root}/constitution",
         "disclaimer": DISCLAIMER,

@@ -1,0 +1,14 @@
+[
+  {"id": "math-408", "text": "17 * 24 = 408", "expected": "supported"},
+  {"id": "eiffel-paris", "text": "The Eiffel Tower is located in Paris.", "expected": "supported"},
+  {"id": "eiffel-berlin", "text": "The Eiffel Tower is located in Berlin.", "expected": "conflicting"},
+  {"id": "canberra", "text": "Canberra is the capital city of Australia.", "expected": "supported"},
+  {"id": "sydney-capital", "text": "Sydney is the capital city of Australia.", "expected": "conflicting"},
+  {"id": "bill-opinion", "text": "I think the bill is a disaster for small farms.", "expected": "opinion"},
+  {"id": "water-boils", "text": "Water boils at 100 degrees Celsius at sea level.", "expected": "supported"},
+  {"id": "pacific", "text": "The Pacific Ocean is the largest ocean on Earth.", "expected": "supported"},
+  {"id": "gold-gas", "text": "Gold is a gas at room temperature.", "expected": "conflicting"},
+  {"id": "mars-2030", "text": "Humans will establish a permanent colony on Mars by 2030.", "expected": "hypothesis"},
+  {"id": "superconductor", "text": "A room-temperature superconductor will be sold in stores next year.", "expected": "hypothesis"},
+  {"id": "hamlet", "text": "Shakespeare wrote the play Hamlet.", "expected": "supported"}
+]

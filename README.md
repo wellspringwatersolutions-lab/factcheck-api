@@ -193,10 +193,12 @@ Stripe credit packs and TAO deposits are stub interfaces in `src/factcheck/payme
 Streamable HTTP is at `/mcp`. No key is required for the one free check.
 
 ```text
-add https://<your-host>/mcp to Claude/Cursor
+Claude Desktop: add a streamable HTTP server at https://<your-host>/mcp
+Cursor: add https://<your-host>/mcp to Cursor
+Generic streamable HTTP: POST https://<your-host>/mcp
 ```
 
-Tools: `verify_text`, `verify_claims`, `get_verification`. Schemas set `additionalProperties` to false.
+Tools: `verify_text`, `verify_claims`, `start_check`, `get_job`, `get_verification`, `report_bad_verdict`. Schemas set `additionalProperties` to false. `server.json` in the repo is a draft MCP Registry card and is not published.
 
 `/llms.txt` and `/.well-known/mcp.json` describe the server and that install line.
 

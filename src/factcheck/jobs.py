@@ -20,8 +20,13 @@ def enqueue_check(service, *, text, claims, question, identity, budget: float = 
     service.store.create_job(job_id)
     source_text = (question or "").strip() or text or "\n".join(claims or [])
 
-    def progress(done: int, total: int) -> None:
-        service.store.update_job(job_id, status="running", done=done, total=total)
+    def progress(done: int, total: int, claims=None) -> None:
+        if claims:
+            from factcheck.web_report import check_claim_rows
+
+            service.store.set_job_claims(job_id, check_claim_rows(claims, source_text), done=done, total=total)
+        else:
+            service.store.update_job(job_id, status="running", done=done, total=total)
 
     def run() -> None:
         from factcheck.mcp_server import reset_identity, set_identity

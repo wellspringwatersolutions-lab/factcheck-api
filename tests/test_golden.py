@@ -108,9 +108,10 @@ def test_golden_question_mode_checks_positive_facts_and_does_not_unconfirm():
     )
     assert kept_facts >= 2
     assert "thin" not in result.draft_answer.text.lower()
-    assert result.synopsis.answer == "no"
+    assert result.synopsis.answer == "not_enough_evidence"
     assert result.synopsis.answer == result.draft_answer.stance
-    assert result.synopsis.rating in {"Accurate", "Mostly accurate"}
+    assert result.synopsis.rating == "Not enough evidence"
+    assert any("thin" in item.lower() for item in result.synopsis.caveats)
     assert not result.draft_answer.text.lower().startswith("unconfirmed:")
 
 
@@ -255,12 +256,14 @@ def test_a_supportive_snopes_page_keeps_the_fortress_origin_likely_true():
     from factcheck.types import Evidence, JudgeVote
 
     claim = (
-        "That rumor blew up on TikTok and Facebook after Pete Hegseth announced FORTRESS America, "
-        "a Pentagon initiative ordering major U.S. military bases to operate off-grid for 90 days."
+        "That rumor blew up on TikTok and Facebook after Defense Secretary Pete Hegseth announced FORTRESS America, "
+        "a Pentagon initiative ordering major U.S. military bases to become capable of operating off-grid for 90 days "
+        "in case of war or sabotage."
     )
     page = (
-        "Snopes rating: False. The U.S. government has not told civilians to hoard 90 days of food. "
-        "The posts misread FORTRESS America, a Pentagon initiative ordering major U.S. military bases to operate off-grid for 90 days."
+        "Snopes rating: False. The hoarding rumor is false. The U.S. government has not told civilians to hoard 90 days of food. "
+        "Defense Secretary Pete Hegseth announced FORTRESS America, a Pentagon initiative ordering major U.S. military bases "
+        "to become capable of operating off-grid for 90 days in case of war or sabotage."
     )
     evidence = Evidence(
         url="https://www.snopes.com/fact-check/fortress-food",

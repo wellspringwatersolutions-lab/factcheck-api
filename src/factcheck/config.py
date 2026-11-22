@@ -36,6 +36,12 @@ class Settings(BaseSettings):
     judge_b_model: str = "Qwen/Qwen3.5-397B-A17B-TEE"
     tiebreak_model: str = "zai-org/GLM-5.1-TEE"
     extract_model: str = "deepseek-ai/DeepSeek-V3.2-TEE"
+    # Empty keeps extraction on Qwen3.5-397B then DeepSeek-V3.2.
+    # Set only when a faster model matches that quality. Affine was not in the
+    # Chutes catalog checked on 2026-11-22, so it is not selected here.
+    fast_model: str = ""
+    claim_cache_ttl_seconds: int = 7 * 24 * 3600
+    claim_cache_path: str = ""
 
     # Soma is an internal dev endpoint. It is not a production provider.
     soma_api_key: str = ""
@@ -51,6 +57,7 @@ class Settings(BaseSettings):
     desearch_api_key: str = ""
     desearch_base_url: str = "https://api.desearch.ai"
     google_factcheck_api_key: str = ""
+    harnyx_api_key: str = ""
     claimbuster_api_key: str = ""
     nara_api_key: str = ""
     smithsonian_api_key: str = ""
@@ -86,6 +93,15 @@ class Settings(BaseSettings):
     bootstrap_credits: float = 0.0
     owner_ips: str = ""
     owner_key: str = ""
+    data_dir: str = ""
+    # Comma-separated sha256 hex digests. A listed key is an unlimited tester.
+    tester_key_sha256s: str = ""
+    # Prefer this. `sha256hex:usd` lifetime budgets. A hash here is not unlimited.
+    tester_key_budgets: str = ""
+    # Floor seed after a redeploy: `hashprefix8:usd`.
+    tester_key_spent: str = ""
+    # `name:sha256hex:usd_per_day`. Empty unless an operator sets it. No bot keys are built in.
+    agent_key_daily: str = ""
 
     # USD per million tokens. Unknown models use the conservative default.
     default_input_usd_per_million: float = 1.0

@@ -98,7 +98,14 @@ class ClaimOut(BaseModel):
     verdict_label: str = ""
     verdict_detail: VerdictDetail | None = None
     strength_of_support: float = 0.0
-    confidence: float = 0.0
+    confidence: float = Field(
+        default=0.0,
+        description="Machine-readable confidence from 0 to 1. This is the strength of the evidence, not a model's self-score.",
+    )
+    recommended_action: Literal["safe_to_state", "state_with_caveat", "do_not_state"] = Field(
+        default="do_not_state",
+        description="safe_to_state when a supported claim is at least 0.6 confident. state_with_caveat for a weaker supported claim or a hypothesis. do_not_state for opinion, conflicting, and unverified.",
+    )
     reasoning: str
     attribution: str | None = None
     span: str = ""
@@ -176,9 +183,13 @@ class UsageOut(BaseModel):
     estimated_cost_usd: float = 0.0
     retriever_cost_usd: float = 0.0
     retrieval_calls: int = 0
+    cached_claims: int = 0
     drops: dict[str, int] = Field(default_factory=dict)
     credits_charged: float = 0.0
     tier: str = "free"
+    caller: str = ""
+    tester_budget_remaining_usd: float | None = None
+    budget_remaining_usd: float | None = None
     models: dict[str, str] = Field(default_factory=dict)
 
 
@@ -256,6 +267,11 @@ class CheckClaimOut(BaseModel):
     verdict_detail: VerdictDetail | None = None
     span: str = ""
     strength_of_support: float = 0.0
+    confidence: float = Field(default=0.0, description="Confidence from 0 to 1.")
+    recommended_action: Literal["safe_to_state", "state_with_caveat", "do_not_state"] = Field(
+        default="do_not_state",
+        description="Whether an agent should state this claim.",
+    )
     checked_at: str = ""
     would_settle: str = ""
     sources: list[CheckSourceOut] = Field(default_factory=list)
@@ -277,6 +293,21 @@ class CheckReportOut(BaseModel):
     request_id: str = ""
 
 
+class FeedbackIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    request_id: str
+    claim: str
+    suggested_verdict: PublicVerdict
+    reason: str
+    source_url: str = ""
+
+
+class FeedbackOut(BaseModel):
+    feedback_id: str
+    duplicate: bool = False
+    request_id: str = ""
+
+
 class JobAccepted(BaseModel):
     job_id: str
     status: Literal["queued"] = "queued"
@@ -292,6 +323,7 @@ class JobStatusOut(BaseModel):
     job_id: str
     status: Literal["queued", "running", "done", "error"]
     progress: JobProgress
+    claims: list[CheckClaimOut] = Field(default_factory=list)
     report: CheckReportOut | None = None
     error: str | None = None
     request_id: str = ""

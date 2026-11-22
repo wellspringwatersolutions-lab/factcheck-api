@@ -164,19 +164,38 @@ def resolve_pronouns(text: str, context: str) -> tuple[str, bool]:
     return name + text[match.end():], False
 
 
-_SUBJECT_NAME = re.compile(r"(?:^|[.!?]\s+)([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2})\b")
+_SUBJECT_PERSON = re.compile(r"(?:^|[.!?]\s+)([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})\b")
+_PERSON = re.compile(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})\b")
+_NOT_A_PERSON = _BAD_ANTECEDENT | {
+    "No", "Yes", "Not", "Unconfirmed", "There", "Was", "Were", "What", "When", "Where",
+    "Who", "How", "Did", "Does", "Has", "Have", "Had", "Is", "Are", "In", "On", "For",
+    "Defense", "Secretary", "Major", "United",
+}
+
+
+def _person_name(match: re.Match[str]) -> str:
+    words = match.group(1).split()
+    while words and words[0] in _NOT_A_PERSON:
+        words = words[1:]
+    if len(words) < 2:
+        return ""
+    return " ".join(words)
 
 
 def _nearest_name(context: str, sentence: str, pronoun: str) -> str:
+    """A proper-noun person named in the question or the text.
+
+    'No' and other sentence openers are not names. If no person is named, the
+    pronoun is left as written.
+    """
+    del pronoun
     index = (context or "").find(sentence) if sentence else -1
     prior = context[:index] if index > 0 else (context or "")
-    chosen = ""
-    for match in _SUBJECT_NAME.finditer(prior):
-        name = match.group(1)
-        if name.split()[0] in _BAD_ANTECEDENT or name in {"He", "She", "They", "It", "This", "That"}:
-            continue
-        chosen = name
-    return chosen
+    subjects = [name for match in _SUBJECT_PERSON.finditer(prior) if (name := _person_name(match))]
+    if subjects:
+        return subjects[-1]
+    named = [name for match in _PERSON.finditer(prior) if (name := _person_name(match))]
+    return named[-1] if named else ""
 
 
 def heuristic_extract(text: str | None, claims: list[str] | None) -> list[ExtractedClaim]:
@@ -447,8 +466,17 @@ class LiveExtractor:
             return payload
 
     def extraction_models(self) -> list[str]:
-        """Qwen first, then DeepSeek. The extract-model setting is not used."""
-        return ["Qwen/Qwen3.5-397B-A17B-TEE", "deepseek-ai/DeepSeek-V3.2-TEE"]
+        """A benchmarked fast model first, then Qwen3.5-397B and DeepSeek-V3.2.
+
+        The extract-model setting is not used. An empty fast_model keeps the
+        two current models, which is the case until a faster model matches them.
+        """
+        fast = (getattr(self.settings, "fast_model", "") or "").strip()
+        models = []
+        for name in (fast, "Qwen/Qwen3.5-397B-A17B-TEE", "deepseek-ai/DeepSeek-V3.2-TEE"):
+            if name and name not in models:
+                models.append(name)
+        return models
 
     def _one_chunk(self, chunk: str) -> list[ExtractedClaim]:
         last_error: Exception | None = None
@@ -542,7 +570,8 @@ class LiveExtractor:
         prepared = (prepare_answer(text) if text else "")[:6000]
         if not prepared:
             return []
-        model = self.extraction_models()[1]
+        models = self.extraction_models()
+        model = next((name for name in models if "DeepSeek-V3.2" in name), models[-1])
         logger.warning("extraction model=%s", model)
         result = self.client.complete(
             model=model,

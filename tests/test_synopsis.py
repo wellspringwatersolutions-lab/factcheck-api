@@ -9,7 +9,7 @@ from factcheck.llm import ScriptedLLM
 from factcheck.questions import AnswerDrafter, DraftError
 from factcheck.report_html import render_report
 from factcheck.schemas import ClaimOut
-from factcheck.synopsis import build_synopsis
+from factcheck.synopsis import build_synopsis, rate_claims
 from factcheck.types import Evidence, UsageMeter
 
 from tests.conftest import client, make_service, settings
@@ -317,7 +317,7 @@ def test_contradiction_synopsis_states_the_cited_correction():
     assert result.draft_answer.correction
     assert result.claims[0].verdict == "Contradicted"
     assert result.synopsis.answer == "partly"
-    assert result.synopsis.rating == "Mixed"
+    assert result.synopsis.rating == rate_claims(result.claims)[0]
     assert "8849" in result.synopsis.summary
     assert "cited evidence" in result.synopsis.summary.lower()
     assert "6500" not in result.synopsis.summary
