@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import re
 
+from factcheck.references import well_documented_fact
 from factcheck.request_ctx import note_drop
 from factcheck.textutil import hostname, overlap
 from factcheck.types import Evidence
@@ -272,10 +273,16 @@ def screen_hits(
         ranked.append((boost, -score, hit))
     ranked.sort(key=lambda item: (item[0], item[1], item[2].url))
     kept = [hit for _, _, hit in ranked]
+    # For biographies, offices and criminality claims an encyclopedia entry is the authoritative
+    # record (graded B later), so it is not dropped in favor of an official page that may 403.
+    biography = well_documented_fact(claim)
     reputable = [
         hit
         for hit in kept
-        if hit.grade in {"A", "B"} or is_official(hit.url) or is_fact_checker(hit.url, hit.source_type)
+        if hit.grade in {"A", "B"}
+        or is_official(hit.url)
+        or is_fact_checker(hit.url, hit.source_type)
+        or (biography and hostname(hit.url or "").endswith("wikipedia.org"))
     ]
     if reputable:
         for hit in kept:

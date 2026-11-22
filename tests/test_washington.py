@@ -189,3 +189,122 @@ def test_fetcher_sends_a_user_agent_uses_wikipedia_api_and_keeps_a_snippet_after
     assert blocked.ok and blocked.status == 200
     assert "first president" in blocked.body
     assert "en.wikipedia.org" in seen and "www.britannica.com" in seen
+
+
+_GW_LEAD = (
+    "George Washington (February 22, 1732 - December 14, 1799) was a Founding Father and the first "
+    "president of the United States, serving from 1789 to 1797. He commanded the Continental Army "
+    "during the American Revolutionary War."
+)
+
+
+def _gw_hits():
+    return [
+        Evidence(
+            url=_WIKI,
+            title="George Washington",
+            snippet=_GW_LEAD,
+            page_text=_GW_LEAD,
+            provider="wikipedia",
+            source_type="encyclopedia",
+            grade="B",
+            origin_id="wikipedia.org",
+        ),
+        Evidence(
+            url="https://www.loc.gov/collections/george-washington-papers/timeline/",
+            title="Colonial period",
+            snippet="George Washington papers timeline for the colonial period.",
+            provider="desearch",
+        ),
+    ]
+
+
+def test_loaded_criminal_accusation_is_contradicted_by_a_reliable_biography():
+    from factcheck.aggregate import decide
+    from factcheck.credibility import annotate
+
+    page = _gw_hits()[0]
+    annotate(page, time_sensitive=False)
+    decision = decide([page], category="T5", claim_text="George Washington was a criminal.")
+    assert decision.verdict == "Contradicted"
+    assert decision.contradicting_quotes and "first president" in decision.contradicting_quotes[0]
+    assert page.entailment == "contradicts"
+    # Absence of any biography still means Unverified, not Contradicted.
+    blank = Evidence(url="https://example.com/x", title="x", snippet="Some blog about crime.", provider="desearch")
+    assert decide([blank], category="T5", claim_text="George Washington was a criminal.").verdict != "Contradicted"
+    # A record that mentions a conviction never yields Contradicted from absence.
+    guilty = Evidence(
+        url="https://en.wikipedia.org/wiki/Someone",
+        title="Someone",
+        snippet="Someone was a governor who was convicted of fraud in 1990.",
+        page_text="Someone was a governor who was convicted of fraud in 1990.",
+        provider="wikipedia",
+        source_type="encyclopedia",
+        grade="B",
+    )
+    assert decide([guilty], category="T5", claim_text="Someone was a criminal.").verdict != "Contradicted"
+
+
+def test_wikipedia_biography_survives_screening_next_to_an_official_page():
+    from factcheck.retain import screen_hits
+
+    kept, _ = screen_hits("George Washington was a criminal.", _gw_hits(), None)
+    assert any("wikipedia.org" in hit.url for hit in kept)
+
+
+def test_accusation_query_also_fetches_the_subjects_biography():
+    from factcheck.references import ReferenceBundle, accusation_subject
+
+    assert accusation_subject("George Washington criminal accusations historical records") == "George Washington"
+    assert accusation_subject("George Washington first United States president") == ""
+
+    bundle = ReferenceBundle(email="lab@example.com")
+    seen = []
+
+    class _Stub:
+        def __init__(self, name):
+            self.name = name
+            self.warnings = []
+
+        def search(self, query, *, limit=1):
+            seen.append((self.name, query))
+            return []
+
+    bundle.wikidata = _Stub("wikidata")
+    bundle.wikipedia = _Stub("wikipedia")
+    bundle.google = None
+    bundle.search("George Washington criminal accusations historical records", categories=["T5"])
+    assert ("wikipedia", "George Washington") in seen
+
+
+def test_first_president_and_criminal_gets_contradicted_and_the_summary_names_it():
+    service, _, _, _ = make_service(hits=_gw_hits(), pages={_WIKI: (200, _GW_LEAD)})
+    result = service.verify(
+        text="George Washington was the first president and also a criminal.",
+        claims=None,
+        client=client(fingerprint="gw-criminal"),
+        charge=False,
+    )
+    by_text = {claim.text: claim for claim in result.claims}
+    criminal = [claim for text, claim in by_text.items() if "criminal" in text.lower()]
+    assert criminal, list(by_text)
+    assert criminal[0].verdict in {"Contradicted", "Conflicting"}
+    assert any(source.quote for source in criminal[0].sources)
+    summary = (result.synopsis.summary or "").lower()
+    assert "criminal" in summary
+
+
+def test_split_claims_summary_addresses_the_false_accusation():
+    service, retriever, _, _ = make_service(hits=_gw_hits(), pages={_WIKI: (200, _GW_LEAD)})
+    result = service.verify(
+        text=None,
+        claims=["George Washington was the first president of the United States.", "George Washington was a criminal."],
+        client=client(fingerprint="gw-split"),
+        charge=False,
+    )
+    verdicts = {claim.text: claim.verdict for claim in result.claims}
+    assert "George Washington charged convicted criminal record" in retriever.queries + retriever.extra_queries
+    assert verdicts["George Washington was a criminal."] == "Contradicted"
+    assert verdicts["George Washington was the first president of the United States."] == "Supported"
+    summary = result.synopsis.summary.lower()
+    assert "criminal" in summary

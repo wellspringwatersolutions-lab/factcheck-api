@@ -44,6 +44,26 @@ def well_documented_fact(query: str) -> bool:
     )
 
 
+_ACCUSATION = re.compile(r"\b(criminal|crimes?|convicted|conviction|felon|arrested|indicted|charged)\b", re.I)
+_PERSON = re.compile(r"\b([A-Z][a-z]+(?:\s+(?:[A-Z]\.|[A-Z][a-z]+)){1,2})\b")
+_NOT_NAME = {"The", "A", "An", "Was", "Is", "Did", "Has", "Were", "In", "On", "When", "Why", "How"}
+
+
+def accusation_subject(query: str) -> str:
+    """The person named in a criminality query, e.g. 'George Washington' from
+    'George Washington criminal accusations historical records'. Empty when none."""
+    text = query or ""
+    if not _ACCUSATION.search(text):
+        return ""
+    for match in _PERSON.finditer(text):
+        words = match.group(1).split()
+        while words and words[0] in _NOT_NAME:
+            words = words[1:]
+        if len(words) >= 2:
+            return " ".join(words)
+    return ""
+
+
 def wants_newspapers(query: str) -> bool:
     """Chronicling America is 1770–1963 newspapers. Skip later years and office facts."""
     text = query or ""
@@ -478,9 +498,15 @@ class ReferenceBundle:
         providers = self.providers_for(categories, query)
         if not providers:
             return []
+        calls = [(provider, query, limit) for provider in providers]
+        subject = accusation_subject(query)
+        if subject and self.wikipedia in providers:
+            # "X criminal record" finds pages about crime, not X. Fetch X's own biography too,
+            # so a judge can see whether the authoritative record mentions any charge.
+            calls.append((self.wikipedia, subject, 1))
         hits: list[Evidence] = []
-        with ThreadPoolExecutor(max_workers=len(providers)) as pool:
-            futures = {pool.submit(provider.search, query, limit=limit): provider for provider in providers}
+        with ThreadPoolExecutor(max_workers=len(calls)) as pool:
+            futures = {pool.submit(provider.search, text, limit=size): provider for provider, text, size in calls}
             try:
                 for future in as_completed(futures, timeout=self.timeout):
                     provider = futures[future]

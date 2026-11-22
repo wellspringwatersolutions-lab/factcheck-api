@@ -54,6 +54,19 @@ _NEGATIVE_CRIME = re.compile(
     re.I,
 )
 _GUILT = re.compile(r"\b(convicted|was charged|found guilty|pleaded guilty|criminal charge)\b", re.I)
+_CRIME_TALK = re.compile(
+    r"\b(criminal|crimes?|felon|felony|convict(?:ed|ion)?|arrest(?:ed)?|indict(?:ed|ment)?|charged|guilty|"
+    r"prison|jail(?:ed)?|sentenced|fraud|murder(?:ed)?|theft|treason)\b",
+    re.I,
+)
+# A loaded accusation: "X was a criminal", "X is a convicted felon", "X committed crimes".
+_POSITIVE_CRIME = re.compile(
+    r"\b(?:an?\s+)?(?:convicted\s+)?(?:criminal|felon|crook|convict)s?\b"
+    r"(?!\s+(?:charges?|cases?|investigations?|records?|courts?|law|trials?|justice|complaints?|probes?|"
+    r"defen[cs]e|lawyers?|organi[sz]ations?|enterprises?|networks?|history|activit(?:y|ies)|code|procedure))"
+    r"|\bcommitted\s+(?:a\s+)?crimes?\b",
+    re.I,
+)
 _ROLE_WORDS = re.compile(r"\b(president|father|general|born|office|statesman|minister|commander)\b", re.I)
 _WEAK = {"eyewitness", "anecdote", "syndicated", "fact_checker"}
 
@@ -243,6 +256,20 @@ def criminality_absence(claim_text: str, passages: list[Evidence]) -> Evidence |
     return None
 
 
+def criminality_accusation_absence(claim_text: str, passages: list[Evidence]) -> Evidence | None:
+    """Mirror of criminality_absence for the loaded form, e.g. 'X was a criminal'.
+
+    Absence of evidence alone stays Unverified. This only fires when a reliable biography of
+    the person (encyclopedia, Wikipedia/Wikidata, or an A/B source) covers their record and
+    nothing retrieved mentions a charge or conviction. That is an authoritative source
+    covering the topic, so the accusation is contradicted.
+    """
+    text = claim_text or ""
+    if not _POSITIVE_CRIME.search(text) or _NEGATIVE_CRIME.search(text):
+        return None
+    return criminality_absence("was not a criminal", passages)
+
+
 def decide(
     passages: list[Evidence],
     *,
@@ -267,6 +294,14 @@ def decide(
             passage.used = True
             if not passage.quote:
                 passage.quote = text[:400]
+    if _POSITIVE_CRIME.search(claim_text or "") and not _NEGATIVE_CRIME.search(claim_text or ""):
+        # A passage that never mentions a crime cannot back "X was a criminal", however many
+        # of the claim's other words (the name, the office) it shares.
+        for passage in passages:
+            body = passage.quote or passage.snippet or passage.page_text or ""
+            if passage.entailment == "entails" and not _CRIME_TALK.search(body):
+                passage.entailment = "neutral"
+                passage.used = False
     supporting = _independent(passages, "entails")
     contradicting = _independent(passages, "contradicts")
     for passage in passages:
@@ -360,6 +395,25 @@ def decide(
                 ),
                 needs_human_review=False,
                 supporting_quotes=[quote],
+            )
+
+    accusation = None if supporting else criminality_accusation_absence(claim_text, passages)
+    if accusation is not None:
+        quote = _biographical_sentence(accusation.page_text or accusation.snippet or accusation.quote)
+        if quote:
+            accusation.quote = quote
+            accusation.used = True
+            accusation.entailment = "contradicts"
+            return Decision(
+                verdict="Contradicted",
+                strength_of_support=0.62,
+                reasoning=(
+                    "Contradicted. A reliable biography covers this person's record and describes them "
+                    "in non-criminal terms, and no retrieved source shows any criminal charge or conviction. "
+                    f"{quote} {STRENGTH_NOTE}"
+                ),
+                needs_human_review=False,
+                contradicting_quotes=[quote],
             )
 
     if not supporting and not contradicting:

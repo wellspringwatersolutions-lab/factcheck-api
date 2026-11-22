@@ -53,6 +53,7 @@ A Supported claim is stated plainly. A likely_true claim is "Reputable sources r
 State a Supported claim as true. A likely_true or Hypothesis claim is only probably true: phrase it as "Reputable sources report ...", not as a confirmed fact.
 A Contradicted claim is disputed: say the sources contradict or dispute it. Do not state it as true.
 Mention an Unverified claim only to say it could not be confirmed, and never lead with it.
+Address every claim in the list. Never skip a Contradicted or Conflicting claim.
 Do not cut a sentence off in the middle. Use a shorter confirmed claim instead of trimming a long one.
 Return JSON {{"summary": "...", "tldr": "..."}}"""
 
@@ -600,6 +601,11 @@ def _phrasing_ok(summary: str, tldr: str, rating: str, claims: list[ClaimOut] | 
         if not _voice_ok(sentence, probable, disputed):
             return False
         if ", and " in sentence.lower() and _uses_two_claims(sentence, claims):
+            return False
+    summary_words = _claim_words(summary)
+    for claim in _checked_facts(claims):
+        # A disputed claim must be addressed, not silently dropped from the bottom line.
+        if claim.verdict in {"Contradicted", "Conflicting"} and _marks(claim.text) and not (_marks(claim.text) & summary_words):
             return False
     return True
 

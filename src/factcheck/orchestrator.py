@@ -639,6 +639,17 @@ class VerificationService:
         return list(wiki.search_dated_event(text) or [])
 
     def _search_queries(self, text: str) -> list[str]:
+        queries = self._written_queries(text)
+        from factcheck.references import accusation_subject
+
+        subject = accusation_subject(text)
+        if subject:
+            # A loaded accusation needs the record itself: was this person ever charged or convicted?
+            targeted = f"{subject} charged convicted criminal record"
+            queries = [query for query in queries if query != targeted][:1] + [targeted]
+        return queries
+
+    def _written_queries(self, text: str) -> list[str]:
         writer = getattr(self, "query_writer", None)
         if writer is not None:
             try:
